@@ -27,7 +27,7 @@
  *  Created by Shantonu Sen <ssen@apple.com> on Wed Nov 14 2001.
  *  Copyright (c) 2001-2005 Apple Computer, Inc. All rights reserved.
  *
- *  $Id: bless.c,v 1.81 2005/12/07 04:49:17 ssen Exp $
+ *  $Id: bless.c,v 1.83 2006/03/07 16:51:39 ssen Exp $
  *
  */
 
@@ -65,6 +65,7 @@ static struct option longopts[] = {
 { "kernel",         required_argument,      0,              kkernel },
 { "label",          required_argument,      0,              klabel },
 { "labelfile",      required_argument,      0,              klabelfile },
+{ "legacy",         no_argument,            0,              klegacy },
 { "mkext",          required_argument,      0,              kmkext },
 { "mount",          required_argument,      0,              kmount },
 { "netboot",        no_argument,            0,              knetboot},
@@ -161,6 +162,7 @@ int main (int argc, char * argv[])
             case kkernel:
             case klabel:
             case klabelfile:
+            case klegacy:
             case kmkext:
             case kmount:
             case knetboot:
