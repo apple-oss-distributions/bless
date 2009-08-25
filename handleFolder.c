@@ -182,6 +182,8 @@ int modeFolder(BLContextPtr context, struct clarg actargs[klast]) {
                     bootxpath );
                 }                
             }
+            
+            if (oldBootXdata) CFRelease(oldBootXdata);
         } else {
             blesscontextprintf(context, kBLLogLevelVerbose,  "Could not create BootX, no X folder specified\n" );
         }
@@ -395,7 +397,11 @@ int modeFolder(BLContextPtr context, struct clarg actargs[klast]) {
         
         if(actargs[ksetboot].present &&
            (preboot == kBLPreBootEnvType_OpenFirmware) &&
+#if _DARWIN_FEATURE_64_BIT_INODE
+           (sb.f_fssubtype & ~1)
+#else
            (sb.f_reserved1 & ~1)
+#endif
            ) {
             blesscontextprintf(context, kBLLogLevelVerbose,  "%s is not HFS+ or Journaled HFS+. Not setting finderinfo[0]...\n", actargs[kmount].argument );
             oldwords[0] = 0;
