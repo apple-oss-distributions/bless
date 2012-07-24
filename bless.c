@@ -159,6 +159,9 @@ int main (int argc, char * argv[])
             case ksave9:
                 // ignore, this is now always saved as alternateos
                 break;
+			case kbootblockfile:
+				errx(1, "The bootblockfile option is now obsolete.");
+				break;
             case '?':
             case ':':
                 usage_short();
@@ -235,6 +238,7 @@ int main (int argc, char * argv[])
 
 
 
+// note that libbless has its own (similar) contextprintf()
 int blesscontextprintf(BLContextPtr context, int loglevel, char const *fmt, ...) {
     int ret;
     char *out;

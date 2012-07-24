@@ -249,21 +249,11 @@ typedef enum {
 	
 } BLNetBootProtocolType;
 
-/***** BootBlocks *****/
 
-
-/*!
- * @function BLSetBootBlocks
- * @abstract Write boot blocks to a volume
- * @discussion Write the bytes from <b>bootblocks</b>
- *   as the boot blocks of the HFS+ volume mounted at <b>mountpoint</b>
- * @param context Bless Library context
- * @param mountpoint mountpoint of volume to modify
- * @param bootblocks buffer of at most 1024 bytes to hold boot blocks
- */
-int BLSetBootBlocks(BLContextPtr context,
-		    const char * mountpoint,
-		    const CFDataRef bootblocks);
+enum {
+	kBitmapScale_1x		=	1,
+	kBitmapScale_2x		=	2
+};
 
 /***** FinderInfo *****/
 
@@ -271,7 +261,7 @@ int BLSetBootBlocks(BLContextPtr context,
  * @function BLCreateVolumeInformationDictionary
  * @abstract Gather bootability information on a volume
  * @discussion Return information on the volume at <b>mount</b>,
- *     including blessed folder IDs and paths, UUID, boot blocks,
+ *     including blessed folder IDs and paths, UUID,
  *     and return it as a CFDictionary
  * @param context Bless Library context
  * @param mount mountpoint of volume to gather information on
@@ -546,7 +536,22 @@ int BLIsNewWorld(BLContextPtr context);
  */
 int BLGenerateOFLabel(BLContextPtr context,
                     const char * label,
-                    CFDataRef *data);
+                    CFDataRef *data) DEPRECATED_ATTRIBUTE ;
+
+/*!
+ * @function BLGenerateLabelData
+ * @abstract Generate a bitmap label from the given string
+ * @discussion Use CoreGraphics to render
+ *    a bitmap for a label suitable for display
+ *    by the firmware picker.
+ * @param context Bless Library context
+ * @param label UTF-8 encoded text to use
+ * @param scale How big the bitmap should be. kBitmapScale_1x for standard, kBitmapScale_2x for HiDPI
+ * @param data bitmap data returned to caller; must be released by caller.
+ */
+int BLGenerateLabelData(BLContextPtr context, const char *label, int scale, CFDataRef *data);
+
+
 
 /*!
  * @function BLSetOFLabelForDevice
@@ -565,7 +570,32 @@ int BLGenerateOFLabel(BLContextPtr context,
  */
 int BLSetOFLabelForDevice(BLContextPtr context,
 			  const char * device,
-			  const CFDataRef label);
+			  const CFDataRef label) DEPRECATED_ATTRIBUTE ;
+
+
+
+/*!
+ * @function BLSetDiskLabelForDevice
+ * @abstract Set the disk label (displayed by the firmware picker)
+ *    for an unmounted volume
+ * @discussion Use MediaKit to analyze an HFS+
+ *    volume header and catalog to find the disk
+ *    label, and if it exists write the new data.
+ *    If an existing label is not present, or if
+ *    the on-disk allocated extent is too small,
+ *    return an error
+ * @param context Bless Library context
+ * @param device an HFS+ (wrapped or not) device node
+ * @param label a correctly formatted disk label,
+ * @param scale how big the bitmap should be. kBitmapScale_1x for standard, kBitmapScale_2x for HiDPI 
+ *    as returned by BLGenerateLabelData
+ */
+int BLSetDiskLabelForDevice(BLContextPtr context,
+                            const char *device,
+                            const CFDataRef label,
+                            int scale);
+
+
 
 /*!
  * @function BLLoadFile
@@ -688,7 +718,7 @@ int BLSetOpenFirmwareBootDeviceForMountPoint(BLContextPtr context,
  */
 int BLGetDeviceForOpenFirmwarePath(BLContextPtr context,
 				   const char * ofstring,
-				   char * mntfrm);
+				   char * mntfrm) DEPRECATED_ATTRIBUTE;
 
 
 int BLCopyOpenFirmwareNVRAMVariableAsString(BLContextPtr context,
@@ -706,6 +736,7 @@ typedef struct {
 	uint32_t	version;
 	uint32_t	reqType;
 	uint32_t	reqCreator;
+	uint32_t    reqParentDir;
 	char *		reqFilename;
 	
 	CFDataRef	payloadData;
@@ -787,6 +818,8 @@ int BLValidateXMLBootOption(BLContextPtr context,
 							CFStringRef	 binaryName);
 
 kern_return_t BLSetEFIBootDevice(BLContextPtr context, char *bsdName);
+kern_return_t BLSetEFIBootDeviceOnce(BLContextPtr context, char *bsdName);
+kern_return_t BLSetEFIBootFileOnce(BLContextPtr context, char *path);
 
 bool BLSupportsLegacyMode(BLContextPtr context);
 
