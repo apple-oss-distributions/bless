@@ -31,10 +31,12 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <errno.h>
+#include <paths.h>
 #include <apfs/apfs_fsctl.h>
 #include <System/sys/snapshot.h>
 #include <IOKit/storage/IOMedia.h>
 #include <IOKit/IOBSD.h>
+#include <APFS/APFS.h>
 
 #include "bless.h"
 #include "bless_private.h"
@@ -143,6 +145,106 @@ int BLGetAPFSSnapshotBlessData(BLContextPtr context, const char *mountpoint, uui
     return 0;
 }
 
+
+int BLCreateAndSetSnapshotBoot(BLContextPtr context, const char *mountpoint, char *snapName, int nameLen)
+{
+	int				ret = 0;
+	int				vol_fd = -1;
+	uuid_t			uuid;
+	uuid_string_t	uuid_str;
+	io_service_t	volMedia = IO_OBJECT_NULL;
+	io_service_t	systemMedia = IO_OBJECT_NULL;
+	struct statfs	sfs;
+	CFStringRef		bsdCF;
+	char			systemDev[64] = _PATH_DEV;
+	char			systemMount[MAXPATHLEN];
+	int				mntsize;
+	struct statfs   *mnts;
+	int				i;
+	bool			mustUnmountSystem = false;
+	
+	if (statfs(mountpoint, &sfs) < 0) {
+		ret = errno;
+		contextprintf(context, kBLLogLevelError, "Couldn't get volume information for volume %s: %s\n", mountpoint, strerror(ret));
+		goto exit;
+	}
+	volMedia = IOServiceGetMatchingService(kIOMasterPortDefault, IOBSDNameMatching(kIOMasterPortDefault, 0,
+																				   sfs.f_mntfromname + strlen(_PATH_DEV)));
+	if (!volMedia) {
+		ret = ENOENT;
+		contextprintf(context, kBLLogLevelError, "Couldn't get IOMedia for volume %s\n", mountpoint);
+		goto exit;
+	}
+	
+	if (IOObjectConformsTo(volMedia, "AppleAPFSSnapshot")) {
+		contextprintf(context, kBLLogLevelVerbose, "Volume %s is mounted from a snapshot\n", mountpoint);
+		ret = BLAPFSSnapshotToVolume(context, volMedia, &systemMedia);
+		if (ret) {
+			contextprintf(context, kBLLogLevelError, "Couldn't not resolve snapshot at %s to volume\n", sfs.f_mntfromname);
+			goto exit;
+		}
+		bsdCF = IORegistryEntryCreateCFProperty(systemMedia, CFSTR(kIOBSDNameKey), kCFAllocatorDefault, 0);
+		if (!bsdCF) {
+			ret = ENOENT;
+			contextprintf(context, kBLLogLevelError, "No BSD name for system volume media\n");
+			goto exit;
+		}
+		CFStringGetCString(bsdCF, systemDev + strlen(_PATH_DEV), sizeof systemDev - strlen(_PATH_DEV), kCFStringEncodingUTF8);
+		mntsize = getmntinfo(&mnts, MNT_NOWAIT);
+		if (!mntsize) {
+			ret = 5;
+			goto exit;
+		}
+		for (i = 0; i < mntsize; i++) {
+			if (strcmp(mnts[i].f_mntfromname, systemDev) == 0) break;
+		}
+		if (i < mntsize) {
+			strlcpy(systemMount, mnts[i].f_mntonname, sizeof systemMount);
+		} else {
+			// The preboot volume isn't mounted right now.  We'll have to mount it.
+			ret = BLMountContainerVolume(context, systemDev + strlen(_PATH_DEV), systemMount, sizeof systemMount, false);
+			if (ret) {
+				contextprintf(context, kBLLogLevelError, "Couldn't mount system volume from %s\n", systemDev);
+				goto exit;
+			}
+			mustUnmountSystem = true;
+		}
+		mountpoint = systemMount;
+	}
+	
+	uuid_generate(uuid);
+	uuid_unparse(uuid, uuid_str);
+	snprintf(snapName, nameLen, "com.apple.bless.%s", uuid_str);
+	
+	if ((vol_fd = open(mountpoint, O_RDONLY)) < 0) {
+		ret = errno;
+		contextprintf(context, kBLLogLevelError, "Couldn't open volume %s for snapshot creation: %s\n", mountpoint, strerror(ret));
+		goto exit;
+	}
+	
+	if (fs_snapshot_create(vol_fd, snapName, 0) < 0) {
+		ret = errno;
+		contextprintf(context, kBLLogLevelError, "Couldn't create snapshot on volume %s: %s\n", mountpoint, strerror(ret));
+		goto exit;
+	}
+
+	if (fs_snapshot_root(vol_fd, snapName, 0) < 0) {
+		ret = errno;
+		contextprintf(context, kBLLogLevelError, "Couldn't root snapshot on volume %s: %s\n", mountpoint, strerror(ret));
+		goto exit;
+	}
+	
+exit:
+	if (vol_fd >= 0) close(vol_fd);
+	if (volMedia) IOObjectRelease(volMedia);
+	if (systemMedia) IOObjectRelease(systemMedia);
+	if (mustUnmountSystem) {
+		BLUnmountContainerVolume(context, systemMount);
+	}
+	return ret;
+}
+
+
 int BLSetAPFSSnapshotBlessData(BLContextPtr context, const char *mountpoint, uuid_string_t snap_uuid)
 {
     apfs_snap_name_lookup_t snap_lookup_data = {0};
@@ -180,9 +282,16 @@ CFStringRef BLGetAPFSBlessedVolumeBSDName(BLContextPtr context, const char *moun
 {
     char *slash;
     uuid_t c_uuid;
-    CFStringRef uuid, bsd_name = NULL;
+    CFStringRef inUUID, bsd_name = NULL;
+	CFStringRef testUUID;
     CFMutableDictionaryRef matching = NULL;
     io_service_t service = IO_OBJECT_NULL;
+	io_service_t dataService = IO_OBJECT_NULL;
+	io_iterator_t iter = IO_OBJECT_NULL;
+	CFArrayRef	roleArray;
+	CFStringRef role;
+	kern_return_t kret;
+	bool skipVolUUIDCheck;
 
     if (!vol_uuid) {
         return NULL;
@@ -197,18 +306,74 @@ CFStringRef BLGetAPFSBlessedVolumeBSDName(BLContextPtr context, const char *moun
         return NULL;
     }
 
-    uuid = CFStringCreateWithCString(kCFAllocatorDefault, bless_folder + 1, kCFStringEncodingUTF8);
-    matching = IOServiceMatching("AppleAPFSVolume");
-    CFDictionarySetValue(matching, CFSTR(kIOMediaUUIDKey), uuid);
-    CFRelease(uuid);
+    inUUID = CFStringCreateWithCString(kCFAllocatorDefault, bless_folder + 1, kCFStringEncodingUTF8);
+    matching = IOServiceMatching(APFS_VOLUME_OBJECT);
+	kret = IOServiceGetMatchingServices(kIOMasterPortDefault, matching, &iter);
+	if (kret == KERN_SUCCESS) {
+		while ((service = IOIteratorNext(iter)) != IO_OBJECT_NULL) {
+			skipVolUUIDCheck = false;
+			
+			// Try group UUID and system role
+			testUUID = IORegistryEntryCreateCFProperty(service, CFSTR(kAPFSVolGroupUUIDKey), kCFAllocatorDefault, 0);
+			if (testUUID) {
+				if (CFEqual(testUUID, inUUID)) {
+					roleArray = IORegistryEntryCreateCFProperty(service, CFSTR(kAPFSRoleKey), kCFAllocatorDefault, 0);
+					if (roleArray) {
+						if (CFArrayGetCount(roleArray) > 0) {
+							role = CFArrayGetValueAtIndex(roleArray, 0);
+							if (CFEqual(role, CFSTR("System"))) {
+								CFRelease(testUUID);
+								CFRelease(roleArray);
+								break;
+							} else {
+								// This is the wrong volume in the right group.
+								// We can't check its volume UUID because if it's
+								// the data volume then it will match.
+								// But save it away, in case this is an ARV situation.
+								skipVolUUIDCheck = true;
+								dataService = service;
+								IOObjectRetain(dataService);
+							}
+						}
+						CFRelease(roleArray);
+					}
+				}
+				CFRelease(testUUID);
+			}
+			
+			// No match.  Just try volume UUID
+			if (!skipVolUUIDCheck) {
+				testUUID = IORegistryEntryCreateCFProperty(service, CFSTR(kIOMediaUUIDKey), kCFAllocatorDefault, 0);
+				if (testUUID) {
+					if (CFEqual(testUUID, inUUID)) {
+						CFRelease(testUUID);
+						break;
+					}
+					CFRelease(testUUID);
+				}
+			}
+			
+			IOObjectRelease(service);
+		}
+		IOObjectRelease(iter);
+		if (service) {
+			bsd_name = IORegistryEntryCreateCFProperty(service, CFSTR(kIOBSDNameKey), kCFAllocatorDefault, 0);
+			if (bsd_name) strlcpy(vol_uuid, bless_folder + 1, sizeof(uuid_string_t));
+			IOObjectRelease(service);
+		} else {
+			// We didn't find an appropriate volume, did we find a data volume without a system volume?
+			if (dataService) {
+				// We did!  The system volume must be ARV and we can't see it because our OS is too old.
+				// Use the data volume instead.
+				bsd_name = IORegistryEntryCreateCFProperty(dataService, CFSTR(kIOBSDNameKey), kCFAllocatorDefault, 0);
+				if (bsd_name) strlcpy(vol_uuid, bless_folder + 1, sizeof(uuid_string_t));
+				IOObjectRelease(dataService);
+			}
+		}
+	}
+    CFRelease(inUUID);
 
-    service = IOServiceGetMatchingService(kIOMasterPortDefault, matching);
-    if (service) {
-        bsd_name = IORegistryEntryCreateCFProperty(service, CFSTR(kIOBSDNameKey), kCFAllocatorDefault, 0);
-        if (bsd_name) strcpy(vol_uuid, bless_folder + 1);
-    }
-
-    *slash = '/';
+    if (slash) *slash = '/';
 
     return bsd_name;
 }

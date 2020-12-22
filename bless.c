@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001-2009 Apple Inc. All Rights Reserved.
+ * Copyright (c) 2001-2020 Apple Inc. All Rights Reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -67,6 +67,7 @@ static struct option longopts[] = {
 { "bootBlockFile",  required_argument,      0,              kbootblockfile },
 { "bootblockfile",  required_argument,      0,              kbootblockfile },
 { "booter",         required_argument,      0,              kbooter },
+{ "create-snapshot",no_argument,			0,              kcreatesnapshot },
 { "device",         required_argument,      0,              kdevice },
 { "firmware",       required_argument,      0,              kfirmware },	
 { "file",           required_argument,      0,              kfile },
@@ -80,12 +81,14 @@ static struct option longopts[] = {
 { "kernelcache",    required_argument,      0,              kkernelcache },
 { "label",          required_argument,      0,              klabel },
 { "labelfile",      required_argument,      0,              klabelfile },
+{ "last-sealed-snapshot",no_argument,	    0,              klastsealedsnapshot },
 { "legacy",         no_argument,            0,              klegacy },
 { "legacydrivehint",required_argument,      0,              klegacydrivehint },
 { "mkext",          required_argument,      0,              kmkext },
 { "mount",          required_argument,      0,              kmount },
 { "netboot",        no_argument,            0,              knetboot},
 { "nextonly",       no_argument,            0,              knextonly},
+{ "noapfsdriver",   no_argument,            0,              knoapfsdriver},
 { "openfolder",     required_argument,      0,              kopenfolder },
 { "options",        required_argument,      0,              koptions },
 { "payload",        required_argument,      0,              kpayload },

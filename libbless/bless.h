@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001-2007 Apple Inc. All Rights Reserved.
+ * Copyright (c) 2001-2020 Apple Inc. All Rights Reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -137,6 +137,18 @@ typedef struct {
 #define kBL_PATH_CORESERVICES "/System/Library/CoreServices"
 
 /*!
+ * @define kBL_PATH_KERNELCOLLECTIONS
+ * @discussion Location of the kernel collection files
+ */
+#define kBL_PATH_KERNELCOLLECTIONS "/System/Library/KernelCollections"
+
+/*!
+ * @define kBL_NAME_BOOTKERNELEXTENSIONS
+ * @discussion Specific set of kernel collection files
+ */
+#define kBL_NAME_BOOTKERNELEXTENSIONS "BootKernelExtensions.kc"
+
+/*!
  * @define kBL_PATH_I386_BOOT0
  * @discussion MBR boot code
  */
@@ -188,15 +200,15 @@ typedef struct {
  * @define kBL_PATH_SYSTEM_VERSION_PLIST
  * @discussion OS version information
  */
-#define kBL_PATH_SYSTEM_VERSION_PLIST "/System/Library/CoreServices/SystemVersion.plist"
+#define kBL_PATH_SYSTEM_VERSION_PLIST kBL_PATH_CORESERVICES "/SystemVersion.plist"
 
 
 /*!
  * @define kBL_PATH_BRIDGE_VERSION_*
  * @discussion SecureBoot-related files
  */
-#define kBL_PATH_BRIDGE_VERSION_BIN         "/System/Library/CoreServices/BridgeVersion.bin"
-#define kBL_PATH_BRIDGE_VERSION_PLIST       "/System/Library/CoreServices/BridgeVersion.plist"
+#define kBL_PATH_BRIDGE_VERSION_BIN         kBL_PATH_CORESERVICES "/BridgeVersion.bin"
+#define kBL_PATH_BRIDGE_VERSION_PLIST       kBL_PATH_CORESERVICES "/BridgeVersion.plist"
 
 
 /*!
@@ -210,7 +222,6 @@ typedef struct {
  * @discussion HFS+ type for OpenFirmware volume label
  */
 #define kBL_OSTYPE_PPC_TYPE_OFLABEL 'tbxj'
-
 
 /*!
 * @define kBL_OSTYPE_PPC_TYPE_OFLABEL_PLACEHOLDER
@@ -276,18 +287,18 @@ typedef enum {
 	
 } BLNetBootProtocolType;
 
-
 enum {
 	kBitmapScale_1x		=	1,
 	kBitmapScale_2x		=	2
 };
-
 
 typedef struct {
 	int major;
 	int minor;
 	int patch;
 } BLVersionRec;
+
+
 
 /***** FinderInfo *****/
 
@@ -305,6 +316,8 @@ int BLCreateVolumeInformationDictionary(BLContextPtr context,
 					const char * mountpoint,
 					CFDictionaryRef *outDict);
 
+
+
 /*!
  * @function BLGetFinderFlag
  * @abstract Fetch Finder flags for a file/directory
@@ -320,6 +333,9 @@ int BLGetFinderFlag(BLContextPtr context,
 		    const char * path,
 		    uint16_t flag,
 		    int *retval);
+
+
+
 /*!
  * @function BLSetFinderFlag
  * @abstract Set Finder flags for a file/directory
@@ -351,6 +367,8 @@ int BLGetVolumeFinderInfo(BLContextPtr context,
 			  const char * mountpoint,
 			  uint32_t * words);
 
+
+
 /*!
  * @function BLSetVolumeFinderInfo
  * @abstract Set Finder info words for a volume
@@ -367,6 +385,8 @@ int BLSetVolumeFinderInfo(BLContextPtr context,
 			  const char * mountpoint,
 			  uint32_t * words);
 
+
+
 /*!
  * @function BLSetTypeAndCreator
  * @abstract Set the HFS Type and Creator for a file
@@ -382,6 +402,8 @@ int BLSetTypeAndCreator(BLContextPtr context,
 			const char * path,
 			uint32_t type,
 			uint32_t creator);
+
+
 
 /***** HFS *****/
 
@@ -412,6 +434,8 @@ int BLBlessDir(BLContextPtr context,
 	       uint32_t dir9,
 	       int useX);
 
+
+
 /*!
  * @function BLGetFileID
  * @abstract Get the file ID for a file
@@ -424,6 +448,8 @@ int BLBlessDir(BLContextPtr context,
 int BLGetFileID(BLContextPtr context,
 		const char * path,
 		uint32_t *folderID);
+
+
 
 /*!
  * @function BLIsMountHFS
@@ -439,6 +465,10 @@ int BLIsMountHFS(BLContextPtr context,
 		 const char * mountpt,
 		 int *isHFS);
 
+
+
+/***** APFS *****/
+
 /*!
  * @function BLIsMountAPFS
  * @abstract Test if the volume is APFS
@@ -452,6 +482,33 @@ int BLIsMountHFS(BLContextPtr context,
 int BLIsMountAPFS(BLContextPtr context,
                   const char * mountpt,
                   int *isAPFS);
+
+
+
+/*!
+ * @function BLIsMountAPFSDataRolePreSSVToSSV
+ * @abstract Test if the volume is an APFS "Data"-role-supplied look-ahead-to-SSV case
+ * @discussion Perform various checks on
+ *    the volume at <b>mountpt</b> as well as
+ *    Preboot and report true if (a) mountpt is likely an APFS
+ *    Secure System Volume (SSV) volume that can be booted,
+ *    AND YET (b) the currently-running OS does not fully support
+ *    the format of the target APFS volume, and (c) you are able
+ *    to refer to your target only because its DATA-role volume is
+ *    visible (its SYSTEM-role is not due to incompatibility). This
+ *    result can be useful in judging whether it is OK to skip certain
+ *    checks or extra boot file writing preparations, in situations
+ *    where it is necesary to provide a method to boot a "future" OS.
+ *    You should not skip such extras if you are on an OS which
+ *    does indeed fully support the format of your target volume.
+ * @param context Bless Library context (input)
+ * @param mountpt Mountpoint of volume (input)
+ * @param isAPFSPreSSVToSSV is the mount part of a bootable apfs SSV setup? (output)
+ */
+int BLIsMountAPFSDataRolePreSSVToSSV(BLContextPtr context,
+                                     const char * mountpt,
+                                     bool *isPreSSVToSSV);
+
 
 
 /*!
@@ -480,6 +537,22 @@ int BLGetAPFSBlessData(BLContextPtr context, const char *mountpoint, uint64_t *w
  *      zero filled otherwise.
  */
 int BLGetAPFSSnapshotBlessData(BLContextPtr context, const char *mountpoint, uuid_string_t snap_uuid);
+
+
+/*!
+ * @function BLCreateAndSetSnapshotBoot
+ * @abstract Create a snapshot and set it to boot an APFS volume
+ * @discussion Make the necessary calls to
+ *    set blessed snapshot information
+ *    from the volume mounted at <b>mountpoint</b>.
+ *    snapName should be at least 64 bytes.
+ * @param context Bless Library context
+ * @param mountpoint Mountpoint of volume
+ * @param snapName name of newly created snapshot
+ * @param nameLen size of buffer to hold snapshot name
+ */
+int BLCreateAndSetSnapshotBoot(BLContextPtr context, const char *mountpoint, char *snapName, int nameLen);
+
 
 
 
@@ -557,7 +630,94 @@ int BLCreateAPFSVolumeInformationDictionary(BLContextPtr context, const char *mo
 
 
 
+/*!
+ * @function BLEnsureSpecialAPFSVolumeUUIDPath
+ * @abstract Mount an APFS Volume's role-defined (e.g. Preboot) helper volume;
+ *           return a path to the UUID dir on the helper; hint for mount state restore
+ * @discussion For the target APFS Volume BSD you pass in (in the /dev/diskCsV-style),
+ *             the associated APFS Volume Role, such as Preboot, is found, and if
+ *             found, then the roled-volume is attempted to mounted if not mounted
+ *             already. A flag is returned so that you can restore the mount state,
+ *             e.g. with BLUnmountContainerVolume. The Role that you pass in must
+ *             be limited to those of "special" volumes for which there is only exactly
+ *             zero or one per container, such as Preboot and Recovery.
+ * @param context Bless Library context (input)
+ * @param volumeDev /dev/disk* device name of the target/"host" volume to which the given roled-volume belongs (input)
+ * @param specialRole APFS Volume Role (in APFS 16-bit role code format); see limitation above (input)
+ * @param useGroupUUID Whether to assume the on-special-volume UUID dir should be named after the Volume Group (input)
+ * @param subjectpath Path to the role-volume mountpoint plus slash plus target-volume uuid (output)
+ * @param subjectLen Maximum (string buffer) size for subject dir path (input)
+ * @param didMount Whether this routine had to mount the roled volume (output)
+ */
+int BLEnsureSpecialAPFSVolumeUUIDPath(BLContextPtr context, const char *volumeDev, int specialRole, bool useGroupUUID, char *subjectPath, int subjectLen, bool *didMount);
 
+
+
+/*!
+* @function BLRoleForAPFSVolumeDev
+* @abstract Get the role for an APFS Volume
+* @discussion For the target APFS Volume BSD you pass in (in the /dev/diskCsV-style),
+*             the associated APFS Volume Role is checked.
+* @param context Bless Library context (input)
+* @param volumeDev /dev/disk* device name of an APFS volume (input)
+* @param role APFS Volume Role for this APFS Volume
+*/
+int BLRoleForAPFSVolumeDev(BLContextPtr context, const char *volumeDev, uint16_t *role);
+
+
+
+/*!
+ * @function BLIsDataRoleForAPFSVolumeDev
+ * @abstract Determine if the APFS Role setting for an APFS Volume is DATA
+ * @discussion For the target APFS Volume BSD you pass in (in the /dev/diskCsV-style),
+ *             the associated APFS Volume Role is checked.
+ * @param context Bless Library context (input)
+ * @param volumeDev /dev/disk* device name of an APFS volume (input)
+ * @param isDataRole If APFS Volume Role for this APFS Volume is DATA (output)
+ */
+int BLIsDataRoleForAPFSVolumeDev(BLContextPtr context, const char *volumeDev, bool *isDataRole);
+
+
+
+/*!
+* @function BLIsVolumeARV
+* @abstract Determine if a mounted volume is an ARV
+* @discussion Given a mounted volume, return whether or not this volume
+*				is an Authenticated Root Volume.  The volume need not be
+*				sealed for this to return true.
+* @param context Bless Library context (input)
+* @param mountPoint Mount point of the volume in question
+ @param volBSD  disk* device BSD of the volume in question
+* @param arv	Returns result
+* @return	Error code, 0 on successfully determining answer.
+*/
+
+int BLIsVolumeARV(BLContextPtr context, const char *mountPoint, const char* volBSD, bool *arv);
+
+/*!
+* @function BLAPFSSnapshotToVolume
+* @abstract Resolve an IOReg APFS snapshot object to its corresponding APFS volume object
+* @discussion Given an io_service_t object representing an APFS snapshot, return the object
+*				corresponding to the underlying APFS volume.  The newly returned object must
+*				be released by the caller.
+* @param context Bless Library context (input)
+* @param snapshotDev io_service_t for an APFS snapshot (input)
+* @param volumeDev returned io_service_t for the underlying APFS volume (output)
+*/
+int BLAPFSSnapshotToVolume(BLContextPtr context, io_service_t snapshotDev, io_service_t *volumeDev);
+
+/*!
+* @function BLAPFSSnapshotAsRoot
+* @abstract Returns the root snapshot name if available
+* @discussion Given an mountpoint representing an APFS system volume, return the root snapshot if available.
+* @param context Bless Library context (input)
+* @param mountPoint mountPoint to APFS system volume
+* @param snapName returned name of of the snapshot (output)
+ @param nameLen number of bytes to copy in snapName
+ */
+int BLAPFSSnapshotAsRoot(BLContextPtr context, const char *mountPoint, char *snapName, int nameLen);
+
+/***** FileID *****/
 
 /*!
  * @function BLLookupFileIDOnMount
@@ -617,7 +777,6 @@ int BLGetDiskSectorsForFile(BLContextPtr context,
 
 /***** Misc *****/
 
-
 /*!
  * @function BLCreateFile
  * @abstract Create a new file with contents of old one
@@ -638,6 +797,8 @@ int BLCreateFile(BLContextPtr context,
 				 int setImmutable,
                  uint32_t type,
                  uint32_t creator);
+
+
 
 /*!
  * @function BLCreateFileWithOptions
@@ -662,6 +823,8 @@ int BLCreateFileWithOptions(BLContextPtr context,
                             uint32_t creator,
                             int shouldPreallocate);
 
+
+
 /*!
  * @function BLGetCommonMountPoint
  * @abstract Get the volume that both paths reside on
@@ -676,6 +839,8 @@ int BLGetCommonMountPoint(BLContextPtr context,
 			  const char * f1,
 			  const char * f2,
 			  char * mountp);
+
+
 
 /*!
  * @function BLGetParentDevice
@@ -692,6 +857,8 @@ int BLGetParentDevice(BLContextPtr context,
 		      const char * partitionDev,
 		      char * parentDev,
 		      uint32_t *partitionNum);
+
+
 
 /*!
 * @function BLGetParentDeviceAndPartitionType
@@ -713,6 +880,7 @@ int BLGetParentDeviceAndPartitionType(BLContextPtr context,
 		    BLPartitionType *pmapType);
 
 
+
 /*!
  * @function BLIsNewWorld
  * @abstract Is the machine a New World machine
@@ -722,6 +890,8 @@ int BLGetParentDeviceAndPartitionType(BLContextPtr context,
  * @param context Bless Library context
  */
 int BLIsNewWorld(BLContextPtr context);
+
+
 
 /*!
  * @function BLGenerateOFLabel
@@ -735,6 +905,8 @@ int BLIsNewWorld(BLContextPtr context);
 int BLGenerateOFLabel(BLContextPtr context,
                     const char * label,
                     CFDataRef *data) DEPRECATED_ATTRIBUTE ;
+
+
 
 /*!
  * @function BLGenerateLabelData
@@ -811,6 +983,8 @@ int BLLoadFile(BLContextPtr context,
                int useRsrcFork,
                CFDataRef* data);
 
+
+
 /*!
  * @function
  * @abstract   Determine pre-boot environment
@@ -842,6 +1016,8 @@ int BLGetPreBootEnvironmentType(BLContextPtr context,
 
 int BLGetOSVersion(BLContextPtr context, const char *mount, BLVersionRec *version);
 
+
+
 /***** OpenFirmware *****/
 
 /*!
@@ -852,6 +1028,8 @@ int BLGetOSVersion(BLContextPtr context, const char *mount, BLVersionRec *versio
  * @param context Bless Library context
  */
 int BLIsOpenFirmwarePresent(BLContextPtr context);
+
+
 
 /*!
  * @function BLGetOpenFirmwareBootDevice
@@ -868,6 +1046,8 @@ int BLIsOpenFirmwarePresent(BLContextPtr context);
 int BLGetOpenFirmwareBootDevice(BLContextPtr context,
 				const char * mntfrm,
 				char * ofstring);
+
+
 
 /*!
  * @function BLGetOpenFirmwareBootDeviceForMountPoint
@@ -891,6 +1071,8 @@ int BLGetOpenFirmwareBootDeviceForNetworkPath(BLContextPtr context,
                                                const char *path,
 											   char * ofstring);
 
+
+
 /*!
  * @function BLSetOpenFirmwareBootDevice
  * @abstract Set OF <i>boot-device</i>
@@ -904,6 +1086,8 @@ int BLGetOpenFirmwareBootDeviceForNetworkPath(BLContextPtr context,
  */
 int BLSetOpenFirmwareBootDevice(BLContextPtr context,
 				const char * mntfrm);
+
+
 
 /*!
  * @function BLSetOpenFirmwareBootDevice
@@ -920,6 +1104,7 @@ int BLSetOpenFirmwareBootDeviceForMountPoint(BLContextPtr context,
 					     const char * mountpoint);
 
 
+
 /*!
  * @function BLGetDeviceForOpenFirmwarePath
  * @abstract Convert an OF string to a mountpoint
@@ -933,12 +1118,14 @@ int BLGetDeviceForOpenFirmwarePath(BLContextPtr context,
 				   const char * ofstring,
 				   char * mntfrm) DEPRECATED_ATTRIBUTE;
 
-
 int BLCopyOpenFirmwareNVRAMVariableAsString(BLContextPtr context,
                                            CFStringRef  name,
                                            CFStringRef *value);
 
+
+
 /* RAID info */
+
 int BLGetRAIDBootDataForDevice(BLContextPtr context, const char * device,
 							   CFTypeRef *bootData);
 int BLUpdateRAIDBooters(BLContextPtr context, const char * device,

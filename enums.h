@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001-2007 Apple Inc. All Rights Reserved.
+ * Copyright (c) 2001-2020 Apple Inc. All Rights Reserved.
  *
  * @APPLE_LICENSE_HEADER_START@
  * 
@@ -43,10 +43,11 @@ enum {
 	kbootefi,
     kbootblockfile,
     kbooter,
-    kdevice,
+	kcreatesnapshot,
+	kdevice,
     kfile,
-	kfirmware,
-    kfolder,			/* 10 */
+	kfirmware,			/* 10 */
+    kfolder,
     kfolder9,
     kgetboot,
     khelp,
@@ -55,8 +56,9 @@ enum {
     kkernelcache,
     klabel,
     klabelfile,
+	klastsealedsnapshot, /* 20 */
     klegacy,
-    klegacydrivehint,	/* 20 */
+    klegacydrivehint,
     kmkext,
     kmount,
     knetboot,
@@ -64,9 +66,9 @@ enum {
     kopenfolder,
     koptions,
     kpayload,
-	kpersonalize,
+	kpersonalize,       /* 30 */
     kplist,
-    kquiet,				/* 30 */
+    kquiet,
 	krecovery,
     kreset,
     ksave9,
@@ -74,18 +76,17 @@ enum {
     kserver,
     ksetboot,
     kshortform,
-    kstartupfile,
+    kstartupfile,       /* 40 */
     kunbless,
-    kuse9,				/* 40 */
+    kuse9,
     kverbose,
     kversion,
     ksnapshot,
+    knoapfsdriver,
     klast
 };
 
 // getopt_long(3) uses ':' as a special return value
 extern int too_many_options[klast >= ':' ? -1 : 0];
-
-#define kMaxArgLength 2048
 
 #endif // _ENUMS_H_

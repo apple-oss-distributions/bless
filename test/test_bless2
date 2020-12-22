@@ -8,6 +8,25 @@
 #    (1) create a test_<testname> routine
 #    (2) update TestListDictionary with the new test information
 #
+# bless2 library API being used by
+#    kmutil(K), bootabilityutil(B), PurpleRestore(P), bless2cli(C)
+#
+# ...C int bless2_summarize(const char *disk, vol_summary_t **s) __result_use_check;
+# ...C void bless2_summary_free(vol_summary_t *s);
+# .B.C int bless2_isc_preboot(vol_summary_t *s, char *preboot, size_t len);
+# .B.C int bless2_os_preboot(vol_summary_t *s, char *preboot, size_t len);
+# ...C int bless2_os_recovery(vol_summary_t *s, char *recovery, size_t len);
+# K..C int bless2_bootobjects_path(vol_summary_t *s, CFDictionaryRef args,
+#                                  char *out_relative_path, size_t path_size);
+# .BPC int bless2_boot_with_args(vol_summary_t *s, CFDictionaryRef args);
+# ...C int bless2_verify_with_args(vol_summary_t *s, CFDictionaryRef args);
+# .BPC int bless2_install_with_args(vol_summary_t *s, CFDictionaryRef args);
+# .B.C int bless2_gc_with_args(vol_summary_t *s, CFDictionaryRef args);
+# K..C int bless2_install_custom_obj(vol_summary_t *s, CFDictionaryRef args);
+# .B.C int bless2_update_all_custom_objs(bless2_update_function_t fn, void *ctxt,
+#                                       CFDictionaryRef args);
+#
+
 import sys
 import os
 import logging
@@ -31,8 +50,9 @@ from os.path import expanduser
 Debug = False
 ErrorPause = False
 BootPlist = 'com.apple.Boot.plist'
+isArm = True
 
-# LOG file for each test_bless program run on the system
+# LOG file for each test_bless2 program run on the system
 tuuid = uuid.uuid4()
 LOGDIR = '/Library/Logs/test_bless/'
 TESTDIR = LOGDIR + str(tuuid) + '/'
@@ -122,6 +142,20 @@ SWEDMGname = {OSDIR_GOLDEN: '', OSDIR_JAZZ: '', OSDIR_LIB: '', XCODEDIR: ''}
 #
 APFS_SEALER = '/System/Library/Filesystems/apfs.fs/Contents/Resources/apfs_sealvolume'
 
+#
+# For bless2, Apple Silicon systems
+#
+SRCDIR_PATH = '/restore/'
+
+bless2_guuid = ''
+bless2_prebvdev = ''
+bless2_srcdirpath = ''
+bless2_osmanifestpath = ''
+bless2_rootCdev = ''
+bless2_rootVdev = ''
+bless2_root_nvram_boot = ''
+bless2_root_nvram_altboot = ''
+
 
 #================================================
 #    HELPER FUNCTIONS
@@ -131,14 +165,15 @@ APFS_SEALER = '/System/Library/Filesystems/apfs.fs/Contents/Resources/apfs_sealv
 # test_bless program usage
 #
 def usage():
+    print 'This test is for libbless2 on Apple Silicon systems.'
     print 'Usage:'
-    print '    test_bless all | presubmit | remote <option> (Run all or a subset of tests)'
-    print '    test_bless <testname> <option> (Run a given <testname>)'
+    print '    test_bless2 all | presubmit | remote <option> (Run all or a subset of tests)'
+    print '    test_bless2 <testname> <option> (Run a given <testname>)'
     print '    <option>'
     print '        -debug        (Exit right after bless command to debug)'
     print '        -errorpause   (Pause the process on error before clean up)'
-    print '    test_bless -l     (list all <testname>s)'
-    print '    test_bless -c     (clean up all log directories)'
+    print '    test_bless2 -l     (list all <testname>s)'
+    print '    test_bless2 -c     (clean up all log directories)'
     print ''
 
 
@@ -460,6 +495,32 @@ def DeviceToUUID(dev):
 
 
 #
+# Get System Volume device in the Group Volume of the given container
+# that can map to the given sysdevi.
+# e.g. return /dev/disk2s1 for a given snapshot sysdev /dev/disk2s1s1
+#
+def getSystemVolumeDev(container, sysdev):
+    cmd = ['/usr/sbin/diskutil', 'apfs', 'listgroups', '-plist',  container]
+    plist, err = docmd_plist(cmd)
+    if err:
+        logging.info('Can not listgroups for %s', container)
+        return ''
+
+    c_array = plist['Containers']
+    for c_entry in c_array:
+        vol_grps = c_entry['VolumeGroups']
+        if vol_grps != '':
+            for entry in vol_grps:
+                for vol in entry['Volumes']:
+                    devID = '/dev/' + vol['DeviceIdentifier']
+                    if vol['Role'] == 'System' and sysdev.startswith(devID):
+                        return devID
+    logging.info('Can not get System Volume device for %s', sysdev)
+    print 'Can not get System Volume device for ' + sysdev
+    return ''
+
+
+#
 # Get Volume Group UUID for the System Volume in the given Container
 #
 def DeviceToGroupUUID(container, sysdev):
@@ -476,7 +537,7 @@ def DeviceToGroupUUID(container, sysdev):
             for entry in vol_grps:
                 for vol in entry['Volumes']:
                     devID = '/dev/' + vol['DeviceIdentifier']
-                    if vol['Role'] == 'System' and devID == sysdev:
+                    if vol['Role'] == 'System' and sysdev.startswith(devID):
                         guuid = entry['APFSVolumeGroupUUID']
                         logging.info('GroupUUID for %s is %s', sysdev, guuid)
                         print 'GroupUUID for ' + sysdev + ' is ' + guuid
@@ -572,6 +633,7 @@ def DeviceToMntpt(device):
         mntpt = plist['MountPoint']
     except:
         logging.info('Unrecognized MountPoint plist format for %s', device)
+        print 'Unrecognized MountPoint plist format for ' + device
         mntpt = ''
     return mntpt
 
@@ -1139,9 +1201,138 @@ def setupBootPlist(new_uuid):
 
 
 #
+# Setup LocalPolicy:
+#    for external disk: in /System/Volumes/iSCPreboot/<uuid>
+#    for internal disk: in Preboot
+#
+# This test program uses diskimage as the backing store which is
+# treated as an external disk.
+#
+# Use 'personalize_macos' to generate a personalized
+# apticket.<model>.<ECID>.im4m, e.g. apticket.24.8027.368392280012E.im4m,
+# which will be stored in /Volumes/TestSystem/restore/ directory
+#    % personalize_macos -v /Volumes/TestSystem
+#
+# With the apticket, use bpgen to generate a LocalPolicy for external disk:
+# (the apticket should match the img4 files planned for stitching)
+#     % bpgen localpolicy -i <apticket> -d /System/Volumes/iSCPreboot/<uuid>/LocalPolicy'
+#
+# Also, need bootpolicy entitlement set to true:
+#    com.apple.private.security.bootpolicy
+#
+def setupLocalPolicy(src, prebmnt, uuid):
+    docmd(['defaults', 'write', '/Library/Preferences/com.apple.security.bootpolicy', 'Entitlements', '-string', 'always'])
+
+    err = docmd(['/usr/local/bin/personalize_macos', '-v', src.apfsVmntpt])
+    if err:
+        return err
+
+    fromdir = src.apfsVmntpt + SRCDIR_PATH
+    restoredir = prebmnt + '/' + uuid + SRCDIR_PATH
+    docmd(['/bin/mkdir', '-p', restoredir])
+    apticket = ''
+    for file in glob.glob(fromdir + '*'):
+        if 'apticket' in file:
+            apticket = file
+    if apticket == '':
+        logging.error('Fail to get apticket file in %s', fromdir)
+        print 'Fail to get apticket file in ' + fromdir
+        return 1
+    err = docmd(['/bin/cp', apticket, restoredir])
+    if err:
+        return err
+
+    lpdir = '/System/Volumes/iSCPreboot/' + uuid + '/LocalPolicy'
+    docmd(['/bin/mkdir', '-p', lpdir])
+    err = docmd(['/usr/local/bin/bpgen', 'localpolicy', '-i', apticket, '-d', lpdir])
+    if err:
+        logging.error('Fail to generate LocalPolciy in %s', lpdir)
+        print 'Fail to generate LocalPolciy in ' + lpdir
+        return 1
+
+    return 0
+
+
+#
+# Setup 'raw' files needed to feed the libbless2 APIs for boot volume
+# on Apple Silicon
+#
+def setupBless2Files(src, mntpt, the_uuid):
+    global bless2_rootCdev, bless2_rootVdev
+
+    #
+    # Copy files from /System/Volumes/Preboot/<group_uuid> to the
+    # new Preboot mount point as the "raw" files for the testing boot volume.
+    #
+    root_dev = MntptToDevice('/')
+    root_Cdev = DeviceToContainer(root_dev)
+    root_group_uuid = DeviceToGroupUUID(root_Cdev, root_dev)
+    root_prebdir = '/System/Volumes/Preboot/' + root_group_uuid
+    bless2_rootCdev = root_Cdev
+    bless2_rootVdev = root_dev
+
+    #
+    # copy /System/Volumes/Preboot/<root_guuid>/usr/standalone
+    # to <preboot>/<uuid>/usr/
+    # Files: firmware/iBoot.img4, firmware/root_hash.img4,
+    #        firmware/base_system_root_hash.img4, i386/, etc.
+    #
+    fromdir = root_prebdir + '/usr/standalone'
+    todir = mntpt + '/' + the_uuid + '/usr/'
+    docmd(['/bin/mkdir', '-p', todir])
+    err = docmd(['/bin/cp', '-R', fromdir, todir])
+    if err:
+        return err
+
+    #
+    # copy /System/Volumes/Preboot/<root_guuid>/restore
+    # to <preboot>/<uuid>/restore,
+    # but not copy apticket* files (will be generated thru setupLocalPoicy)
+    # Files: BuildManifest.plist, Firmware/*.im4p (payload files), etc.
+    #
+    fromdir = root_prebdir + SRCDIR_PATH
+    todir = mntpt + '/' + the_uuid + SRCDIR_PATH
+    docmd(['/bin/mkdir', '-p', todir])
+    for file in glob.glob(fromdir + '*'):
+        if 'apticket' in file:
+            continue;
+        elif os.path.isdir(file):
+            err = docmd(['/bin/cp', '-R', file, todir])
+        else:
+            err = docmd(['/bin/cp', file, todir])
+    if err:
+        return err
+
+    #
+    # copy /System/Volumes/Preboot/<root_guuid>/boot/System/Library
+    # to <preboot>/<uuid>/System/boot/System
+    # Files: KernelCollections/*
+    #
+    fromdir = root_prebdir + '/boot/System/Library'
+    todir = mntpt + '/' + the_uuid + '/boot/System/'
+    docmd(['/bin/mkdir', '-p', todir])
+    err = docmd(['/bin/cp', '-R', fromdir, todir])
+    if err:
+        return err
+
+    #
+    # Set up LocalPolicy with newly created personalized apticket
+    #
+    err = setupLocalPolicy(src, mntpt, the_uuid)
+    if err:
+        return err
+
+    return 0
+
+
+#
 # Add Preboot and Recovery Volumes to a container using ERB
 #
 def add_preb_recov_volumes(src):
+    global isArm
+    global bless2_prebvdev, bless2_srcdirpath, bless2_osmanifestpath
+    global bless2_guuid
+
     err = docmd(['/usr/local/bin/dmtest', 'erb', src.apfsVdev])
     if err:
         return err
@@ -1177,6 +1368,19 @@ def add_preb_recov_volumes(src):
             logging.error('Fail to copy boot file: %s', file)
             print 'Fail to copy boot file: ' + file
             return err
+
+    #
+    # For bless2, Apple Silicon systems
+    #
+    if isArm == True:
+        err = setupBless2Files(src, prebmntpt, the_uuid)
+        if err:
+            return err
+
+    bless2_guuid = the_uuid
+    bless2_prebvdev = prebvdev
+    bless2_srcdirpath = '/' + the_uuid + SRCDIR_PATH
+    bless2_osmanifestpath = '/' + the_uuid + SRCDIR_PATH
     docmd(['/usr/sbin/diskutil', 'unmount', prebvdev])
 
     #
@@ -1235,179 +1439,6 @@ def seal_source(src):
         print 'Fail to seal the source ' + src.name + ' err = %d\n'%err
     return err
 
-
-#
-# check if a file or folder exits
-# 'path' is the full path of the folder or file
-# return True if exists, False otherwise
-#
-def checkFileDirExist(path) :
-    result = Popen(['ls', path], stdout=PIPE, stderr=PIPE)
-    result.communicate();
-    if (result.returncode == 0) :
-        logging.info("File/Dir '" + path + "' found")
-    else :
-        logging.error("File/Dir '" + path + "' not found")
-
-    return (result.returncode == 0)
-
-
-#
-# check if all the strings in 'strs' can be found in 'src
-# print out log message
-#
-def verifyCmdOutputForStrngs(src, strs, inputDesc) :
-    if src == None or len(src) <= 0 :
-        logging.error(inputDesc + " failed. Input string is empty")
-        return False
-
-    logging.info(inputDesc + ': ' + src)
-    for i in strs :
-        logging.info(inputDesc + " for content '" + i  + "'")
-        if src.find(i) < 0 :
-            logging.error("content '" + i  + "' not found in input")
-            return False
-    return True
-
-
-#
-# remove the special chars in 'chars' from 'src
-#
-def remSpecialChars(src, chars):
-    for i in chars :
-        src = src.replace(i, '')
-    return src;
-
-
-#
-# return a unique string for disk or volume or image name
-# the name will start with 'BLS'
-#
-def getUniqName():
-    cmd = ['mktemp', '-t', 'TEMPNAME']
-    out, err = docmd_common(cmd)
-    out = out.strip('\n')
-    ind = out.find('TEMPNAME')
-    name = None
-    if ind >= 0 :
-        name = "BLS" + out[(ind + 9):]
-    logging.info("UniqueName created: " + name)
-    return name
-
-
-#
-# create a volume in the container with specific role
-# return
-# 1. returncode: 0=success, 1=fail
-# 2. the volume's disk name
-# 3. the volume's name
-#
-def addVolumeToContainer (containerDisk, role) :
-    containerVolName = getUniqName()
-    containerVolDisk = ""
-    cmd = ['diskutil', 'apfs', 'addVolume', containerDisk, 'APFS', containerVolName, '-role', role]
-    docmd(cmd);
-
-    print("call: diskutil list");
-    result = Popen(['diskutil', 'list', containerDisk], stdout=PIPE)
-    result = Popen(['grep', containerVolName], stdin=result.stdout, stdout=PIPE)
-    out, err = result.communicate()
-    if result.returncode != 0 or not out or err:
-        logging.error("Error code " + str(result.returncode))
-        return 1, None, None
-
-    out = remSpecialChars(out, [chr(0xe2), chr(0x81), chr(0xa9), chr(0xa8)])
-    outs = out.split()
-    ind = len(outs)
-    containerVolDisk = outs[ind-1]
-    logging.info("containerVolDisk: " + containerVolDisk + ", containerVolName: " + containerVolName)
-    return 0, containerVolDisk, containerVolName
-
-
-#
-# create a container on 'volDis' and return
-# 1. returncode. 0=success, 1=fail
-# 2. the container's disk name
-# 3. the container's volume1's disk name
-# 4. the container's volume1's name
-#
-def createContainer(imgDisk, volDisk) :
-    containerVol1Name = getUniqName()
-    containerVol1Disk = ""
-    containerDisk = ""
-    cmd = ['diskutil', 'apfs', 'create', volDisk, containerVol1Name]
-    docmd(cmd)
-
-    print("call: diskutil list");
-    result = Popen(['diskutil', 'list', imgDisk], stdout=PIPE)
-    result = Popen(['grep', volDisk], stdin=result.stdout, stdout=PIPE)
-    out, err = result.communicate()
-    if result.returncode != 0 or not out or err:
-       logging.error("Failed to create container. Error code is " + str(result.returncode))
-       return 1, None, None, None
-
-    out = remSpecialChars(out, [chr(0xe2), chr(0x81), chr(0xa9), chr(0xa8)])
-    outs = out.split()
-    containerDisk = outs[3].strip()
-
-    print("call: diskutil list");
-    result = Popen(['diskutil', 'list', containerDisk], stdout=PIPE)
-    result = Popen(['grep', containerVol1Name], stdin=result.stdout, stdout=PIPE)
-    out, err = result.communicate()
-    if result.returncode != 0 or not out or err:
-       logging.error("Failed to get container disk. Error code is " + str(result.returncode))
-       return 1, None, None, None
-
-    out = remSpecialChars(out, [chr(0xe2), chr(0x81), chr(0xa9), chr(0xa8)])
-    outs = out.split()
-    ind = len(outs)
-    containerVol1Disk = outs[ind-1]
-    logging.info("containerVol1Disk: '" + containerVol1Disk +"' created")
-    return 0, containerDisk, containerVol1Disk, containerVol1Name
-
-
-#
-# called by bless_basic test at the end for cleaning up
-# It will call endTest
-#
-def endBlessBasic (returnCode, imgDisk, imgPath, bIS, bAS, savedNVRAM) :
-    if returnCode != 0 :
-        logging.error("test exited ABNORMALLY")
-        mydata = raw_input('type something:')
-
-    logging.info("at exit with result=" + str(returnCode))
-    logging.info("cleaning up the test")
-
-    if bIS :
-        logging.info("Restore NVRAM efi-boot-device setting if needed")
-        if savedNVRAM[0] and len(savedNVRAM[0]) > 100 and savedNVRAM[0].find("efi-boot-device") >= 0 :
-            aStr = savedNVRAM[0][16:] # Get rid of the left-hand-side plus spacer before the right-hand-side value of the nvram -p output
-            logging.info("doing NVRAM WRITE command of efi-boot-device setting; the efi-boot-device-data should automatically follow")
-            cmd = ['nvram', 'efi-boot-device=' + aStr]
-            logging.info("call: {}".format(cmd))
-            result = Popen(cmd, stdout = PIPE, stderr = PIPE)
-            out, err = result.communicate()
-            if out:
-                logging.info("NVRAM WRITE stdout=" + out)
-                logging.info("NVRAM WRITE stderr=" + err)
-
-    if bAS :
-        logging.info("Restore NVRAM boot-device setting if needed")
-        if savedNVRAM[1] and len(savedNVRAM[1]) > 30 and savedNVRAM[1].find("boot-volume") >= 0 :
-            aStr = savedNVRAM[1][12:] # Get rid of the left-hand-side plus spacer before the right-hand-side value of the nvram -p output
-            logging.info("doing NVRAM WRITE command of boot-volume setting; the boot-volume should automatically follow")
-            cmd = ['nvram', 'boot-volume=' + aStr]
-            logging.info("call: {}".format(cmd))
-            result = Popen(cmd, stdout = PIPE, stderr = PIPE)
-            out, err = result.communicate()
-            if out:
-                logging.info("NVRAM WRITE stdout=" + out)
-                logging.info("NVRAM WRITE stderr=" + err)
-
-    docmd(['diskutil', 'eject', imgDisk])
-    docmd(['rm', '-fr', imgPath])
-    testEnd("bless_basic", None, None, returnCode)
-    return returnCode;
 
 #
 # Make a dummy single volume based on a diskimage
@@ -1471,17 +1502,32 @@ def make_dummy_hfsimg(src):
 # Copy some files to Source object
 #
 def fill_os_data(src):
-    dir386 = '/usr/standalone/i386'
+    dirusr = '/usr/'
+    dirsl = '/System/Library/'
     dircs = '/System/Library/CoreServices/'
     bootfiles = dircs + 'boot*'
     svfile = dircs + 'SystemVersion.plist'
     dirtmp = '/var/tmp/'
 
-    docmd(['/usr/bin/ditto', dir386, src.apfsVmntpt + dir386])
-    docmd(['/bin/mkdir', '-p', src.apfsVmntpt + dircs])
+    #
+    # In /usr/standalone, there are bootcaches.plist, i386/, firmware/
+    #
+    todir = src.apfsVmntpt + '/usr'
+    docmd(['/bin/mkdir', '-p', todir])
+    docmd(['/bin/cp', '-R', dirusr + 'standalone', todir])
+
+    # /System/Library/Caches
+    todir = src.apfsVmntpt + dirsl
+    docmd(['/bin/mkdir', '-p', todir])
+    docmd(['/bin/cp', '-R', dirsl + 'Caches', todir])
+
+    # /System/Library/CoreServices/boot*
+    todir = src.apfsVmntpt + dircs
+    docmd(['/bin/mkdir', '-p', todir])
     for file in glob.glob(bootfiles):
-        docmd(['/bin/cp', file, src.apfsVmntpt + dircs])
-    docmd(['/bin/cp', svfile, src.apfsVmntpt + dircs])
+        docmd(['/bin/cp', file, todir])
+    docmd(['/bin/cp', svfile, todir])
+
     docmd(['/bin/mkdir', '-p', src.apfsVmntpt + dirtmp])
     docmd(['/bin/chmod', '777', src.apfsVmntpt + dirtmp])
 
@@ -1828,6 +1874,22 @@ def make_dummy_tgtrosv(tgt):
     docmd(['/usr/sbin/diskutil', 'unmount', tgt.apfsDVdev])
     docmd(['/usr/sbin/diskutil', 'unmount', tgt.apfsVdev])
     return err
+
+
+#
+# Get nvram value for the given string name
+#
+def get_nvram_value(name):
+    nvram = Popen(['/usr/sbin/nvram', name], stdout=PIPE)
+    cmd = "/usr/bin/awk 'NR==1 {print $2}'"
+    value = Popen(cmd, stdin=nvram.stdout, stdout=PIPE, shell=True)
+    out, err = value.communicate()
+    if err:
+        return ''
+    out = out.strip('\n')
+    logging.info('get_nvram_value: %s = %s', name, out)
+    print 'get_nvram_value: ' + name + ' = ' + out
+    return out
 
 
 #================================================
@@ -2197,16 +2259,15 @@ class Target:
 #
 #  TEST CLASS
 #
-TESTFLAG_FOLDER = 1 << 1
-TESTFLAG_MOUNT = 1 << 2
-TESTFLAG_INFO = 1 << 3
-TESTFLAG_Bootefi = 1 << 4
-TESTFLAG_CreateSnap = 1 << 5
-TESTFLAG_LastSealedSnap = 1 << 6
-TESTFLAG_SetBoot = 1 << 7
-TESTFLAG_GetBoot = 1 << 8
-TESTFLAG_Verbose = 1 << 9
-TESTFLAG_OnDataVol = 1 << 10
+TESTFLAG_SetBoot = 1 << 1
+TESTFLAG_Install = 1 << 2
+TESTFLAG_GetIscPreboot = 1 << 3
+TESTFLAG_GetOsPreboot = 1 << 4
+TESTFLAG_GarbageCollect = 1 << 5
+TESTFLAG_CustomInstall = 1 << 6
+TESTFLAG_CustomUpdate = 1 << 7
+TESTFLAG_GetBootpath = 1 << 8
+TESTFLAG_BootOnce = 1 << 9
 
 class Test:
     def __init__(self, testname, testflag, srcopts):
@@ -2214,122 +2275,137 @@ class Test:
         self.testflag = testflag
         self.srcopts = srcopts
 
-    def do_bless(self, src):
-	cmd = ['bless']
+    def do_bless2(self, src):
+        global bless2_prebdev, bless2_srcdirpath, bless2_osmanifestpath
 
-	if src.flag & FLAG_SRC_SSV:
-	    err = seal_source(src)
-	    if err:
-		return err
+	cmd = ['/AppleInternal/CoreOS/tests/bless/bless2cli', '--device', src.apfsVdev]
 
-        if src.apfsVdev != '':
-            err = docmd(['/usr/sbin/diskutil', 'mount', src.apfsVdev])
-        if err == 0 and src.apfsDVdev != '':
-            err = docmd(['/usr/sbin/diskutil', 'mount', src.apfsDVdev])
-	if err:
-	    return err
-
-	# FOLDER, MOUNT, INFO modes
-        if self.testflag & TESTFLAG_OnDataVol:
-	    mntpt = src.apfsDVmntpt
-	else:
-	    mntpt = src.apfsVmntpt
-        if self.testflag & TESTFLAG_FOLDER:
-	    folder = mntpt + '/System/Library/CoreServices/'
-	    cmd = cmd + ['--folder', folder]
-        if self.testflag & TESTFLAG_MOUNT:
-	    cmd = cmd + ['--mount', mntpt]
-        if self.testflag & TESTFLAG_INFO:
-	    cmd = cmd + ['--info', mntpt]
-
-	# Options
-        if self.testflag & TESTFLAG_Bootefi:
-	    cmd = cmd + ['--bootefi']
-        if self.testflag & TESTFLAG_CreateSnap:
-	    cmd = cmd + ['--create-snapshot']
-        if self.testflag & TESTFLAG_LastSealedSnap:
-	    cmd = cmd + ['--last-sealed-snapshot']
         if self.testflag & TESTFLAG_SetBoot:
-	    cmd = cmd + ['--setBoot']
-        if self.testflag & TESTFLAG_GetBoot:
-	    cmd = cmd + ['--getBoot']
-        if self.testflag & TESTFLAG_Verbose:
-	    cmd = cmd + ['--verbose']
-    
+            cmd = cmd + ['--setboot']
+        if self.testflag & TESTFLAG_BootOnce:
+            cmd = cmd + ['--bootonce']
+        if self.testflag & TESTFLAG_Install:
+            prebmntpt = DeviceToMntpt(bless2_prebvdev)
+            srcdirpath = prebmntpt + bless2_srcdirpath
+            osmanifestpath = prebmntpt + bless2_osmanifestpath
+            cmd = cmd + ['--install', '--srcdirpath', srcdirpath, '--osmanifestpath', osmanifestpath]
+        if self.testflag & TESTFLAG_GetIscPreboot:
+            cmd = cmd + ['--getiscpreboot']
+        if self.testflag & TESTFLAG_GetOsPreboot:
+            cmd = cmd + ['--getospreboot']
+        if self.testflag & TESTFLAG_GarbageCollect:
+            cmd = cmd + ['--garbagecollect']
+        if self.testflag & TESTFLAG_CustomInstall:
+            cmd = cmd + ['--custominstall']
+        if self.testflag & TESTFLAG_CustomUpdate:
+            cmd = cmd + ['--customupdate']
+        if self.testflag & TESTFLAG_GetBootpath:
+            cmd = cmd + ['--getbootpath']
+
         err = docmd(cmd)
         return err
 
-    def verify(self, src):
-	#
-	# XXX add a check for OS.dmg.root_hash file in preboot.
-	# A system is considered ARV if preboot has root hash file
-	# or sealed property is present.
-	#
-	if self.testflag & TESTFLAG_CreateSnap:
-            logging.info('Verifying --create-snapshot ...')
-            print 'Verifying --create-snapshot ...\n'
-            out, err = docmd_common(['/usr/local/bin/apfs_snapshot', '-l', src.apfsVmntpt])
-            if err == 0 and out.startswith('com.apple.bless.') and \
-               ('Volume will be rooted from this snapshot on next mount' in out):
-                logging.info('Verifying --create-snapshot Done')
-                print 'Verifying --create-snapshot Done\n'
-                return 0
-            else:
-                logging.error('Verifying --create-snapshot Failed')
-                print 'Verifying --create-snapshot Failed\n'
-		return 1
+    def setbootRoot(self):
+        #
+        # --setboot/--bootonce on the root system volume
+        # i.e. revert nvram value to the original root volume
+        #      . --setboot sets nvram boot-volume
+        #      . --setboot --bootonce sets nvram alt-boot-volume
+        #
+        # If the root volume is a snapshot, need to get the System Volume device
+        # of the snapshot for bless2 to process on.
+        # APFS internals know if it should root from a snapshot on the system volume.
+        #
+        global bless2_rootVdev, bless2_rootCdev
 
+        root_sysVdev = getSystemVolumeDev(bless2_rootCdev, bless2_rootVdev)
+        if root_sysVdev == '':
+            logging.error('getSystemVolumeDev Fail')
+            print 'getSystemVolumeDev Fail'
+            return 1
+
+        if self.testflag & TESTFLAG_BootOnce:
+	    err = docmd(['/AppleInternal/CoreOS/tests/bless/bless2cli', '--device', root_sysVdev, '--setboot', '--bootonce'])
+        else:
+	    err = docmd(['/AppleInternal/CoreOS/tests/bless/bless2cli', '--device', root_sysVdev, '--setboot'])
+
+        if err:
+            logging.error('Fail to setboot to the original root %s on %s', bless2_rootVdev, root_sysVdev)
+            print 'Fail to setboot to the original root ' + bless2_rootVdev + ' on ' + root_sysVdev
+        return err
+
+
+    #
+    # Verify the result of running --install by checking if
+    # /System/Volumes/iSCPreboot/<TestVolumeGUUID>/boot/ directory has a new
+    # file "active" with 'nsih' hex number as its content, which matches a new
+    # directory name in the same directory.
+    #
+    def verify_install(self):
+        global bless2_guuid
+
+        bootdir = '/System/Volumes/iSCPreboot/' + bless2_guuid + '/boot/'
+        active_file = bootdir + 'active'
+        out, err = docmd_common(['/bin/cat', active_file])
+        if err:
+            logging.error('Verifying install Fail - active file not exist: %s', active_file)
+            print 'Verifying install Fail - active file not exist: ' + active_file
+            return err
+        out = out.strip('\n')
+        active_dir = bootdir + out
+        if os.path.isdir(active_dir):
+            return 0
+        else:
+            logging.error('Verifying install Fail - dir not exist: %s', active_dir)
+            print 'Verifying install Fail - dir not exist: ' + active_dir
+            return 1
+
+    #
+    # Verify setboot by comparing nvram values with root's:
+    #    --setboot : nvram 'boot-volume'
+    #    --setboot --bootonce: nvram 'alt-boot-volume'
+    #
+    def verify_setboot(self):
+        global bless2_root_nvram_boot, bless2_root_nvram_altboot
+
+        if self.testflag & TESTFLAG_BootOnce:
+            alt_bootvol = get_nvram_value('alt-boot-volume')
+            if alt_bootvol == bless2_root_nvram_altboot:
+                logging.error('Verifying setboot bootonce Fail')
+                print 'Verifying setboot bootonce Fail'
+                return 1
+        else:
+            bootvol = get_nvram_value('boot-volume')
+            if bootvol == bless2_root_nvram_boot:
+                logging.error('Verifying setboot Fail')
+                print 'Verifying setboot Fail'
+                return 1
+        return 0
+
+    def verify(self, src):
+        logging.info('Verifying ...')
+        print 'Verifying ...'
+
+        err = 0
+        if self.testflag & TESTFLAG_SetBoot:
+            err = self.verify_setboot()
+            if err:
+                return err
+
+        if self.testflag & TESTFLAG_Install:
+            err = self.verify_install()
+            if err:
+                return err
+
+        #
+	# XXX TBD
+        # garbagecollect - check newly installed boot dir is removed?
+        # Verify others?
+        #
 	return 0
 
-	#
-	# More verification - TBD
-	#
-	# XXX --create-snapshot
-        #    . sealed system snapshot: Preboot volume should have
-	#      <GroupUUID>/usr/standalone/OS.dmg.root_hash
-	#      snapshot name: com.apple.os.update-*
-        #    . a new snapshot is created
-        #    . this snapshot is set to be next root
-        #    . the boot object is copied from this snapshot to preboot
-	#
-	# If blessed-volume is ARV
-	#    . KC files are copied with --create-snapshot
-	#      or --last-sealed-snapshot
-	#    . KC files are not copied without --create-snapshot
-	#      or --last-sealed-snapshot
-	# If blessed-volume is not ARV
-	#    . KC files will be copied with or without --create-snapshot
-	#      or --last-sealed-snapshot
-	#
-        # csrutil authenticated-root disable
-        #    . Allow booting from non-sealed system snapshots
-        # csrutil authenticated-root enable
-        #    . Only allow booting from sealed system snapshots
-        #
-        # diskutil apfs list <disk>
-	# diskutil apfs listsnapshots <mntpt>
-        #
-	# XXX --bootefi
-	#    . check the boot loader, boot.efi, is copied
-	#
-	# XXX --setBoot
-	#    . after verfiy, set back to the original system root
-	#
-
     def run(self):
-        global Debug, skip_count
-
-	#
-	# bless --info is not supported on Apple Silicon
-	# Skip all 'info_' tests on Apple Silicon systems
-	#
-	if self.testname.startswith('info_'):
-            out, err = docmd_common(['/usr/bin/uname', '-p'])
-            if out.startswith('arm'):
-                skip_count = skip_count + 1
-		logging.info('SKIP test %s: info not supported on Apple Silicon', self.testname)
-		print 'SKIP test %s: info not supported on Apple Silicon\n'%self.testname
-		return 0
+        global Debug, bless2_root_nvram_boot, bless2_root_nvram_altboot
 
         testBegin(self.testname)
         src = Source(self.srcopts)
@@ -2338,166 +2414,212 @@ class Test:
             testEnd(self.testname, src, '', err)
             return err
 
-        err = self.do_bless(src)
+	if src.flag & FLAG_SRC_SSV:
+	    err = seal_source(src)
+	    if err:
+		return err
+        docmd(['/usr/sbin/diskutil', 'mount', src.apfsVdev])
+
+        #
+        # Do --install first for testing
+        # setboot/garbagecollect/customupdate
+        #
+        if (self.testflag & TESTFLAG_SetBoot) or \
+           (self.testflag & TESTFLAG_GarbageCollect) or \
+           (self.testflag & TESTFLAG_CustomUpdate):
+            save_flag = self.testflag
+            self.testflag = TESTFLAG_Install
+            err = self.do_bless2(src)
+            self.testflag = save_flag
+            if err:
+                testEnd(self.testname, src, '', err)
+                return err
+
+        # Save the root's nvram values for boot-volume and alt-boot-volume
+        bless2_root_nvram_boot = get_nvram_value('boot-volume')
+        bless2_root_nvram_altboot = get_nvram_value('alt-boot-volume')
+
+        # do the test
+        err = self.do_bless2(src)
+
         if Debug:
             exit(err)
 
 	if err == 0 and not self.testname.startswith('neg_'):
 	    err = self.verify(src)
 
+        #
+        # For --setboot or --setboot --bootonce,
+        # revert nvram value to the original root volume
+        #
+        # XXX whatif setbootRoot fails? can't block err from self.verify,
+        #     move this to testEnd?
+        # XXX automate to actually reboot to the test volume?
+        #
+        if self.testflag & TESTFLAG_SetBoot:
+            self.setbootRoot()
+
+        # cleanup
+	docmd(['/AppleInternal/CoreOS/tests/bless/bless2cli', '--device', src.apfsVdev, '--garbagecollect'])
+
         testEnd(self.testname, src, '', err)
         return err
 
 
 #===========================================================
-#  BLESS FUNCTIONS TO TEST
+#  BLESS2CLI FUNCTIONS TO TEST
 #
-#  Bless options review:
-#  https://confluence.sd.apple.com/display/SM/Bless+options+-+Review
+#  bless2cli --setboot --device <device> [--bootonce] [--noverify]
+#  bless2cli --install --device <device>  [--bootcachesfile <file>] [--srcdirpath <path>] [--dstdirpath <path>] [--osmanifestpath <path>]  [--variant <option>] [--overrideuuid]
+#  bless2cli --getiscpreboot --device <device>
+#  bless2cli --getospreboot --device <device>
+#  bless2cli --garbagecollect --device <device>
+#  bless2cli --custominstall --device <device> --bootobjectpayload <file>
+#  bless2cli --customupdate --device <device>
+#  bless2cli --getbootpath --device <device>
 #
-#  3 Modes: FOLDER, MOUNT, INFO
+# For --install --srcdirpath <path>:
+#    The source directory is the restore bundle, so it would typically be
+#    the "restore" directory inside the UUID directory in the preboot volume
+#    that's associated with the given system (same container as volume group,
+#    whether internal or external).
+# For --install --dstdirpath <path>:
+#    The destination directory is the mount point for the preboot volume that
+#    will contain the boot objects, so preboot in same container for internal,
+#    iSC preboot for external.
+# For --install --osmanifestpath:
+#    This needs to be the AP ticket to stitch to the boot objects.
+#    It will typically be in the restore bundle folder, and named something like
+#    apticket.<model>.im4m (for a global manifest) or
+#    apticket.<model>.<ECID>.im4m (for a personalized manifest).
 #
-#  FOLDER mode options:
-#     --folder directory
-#     --bootefi [file]    (X86+AS support kc, boot.efit only for x86)
-#     --label name        (x86, AS?)
-#     --setBoot           (x86, AS should use bless2)
-#     --nextonly          (x86, AS should use bless2) 
-#     --personalize       (X86+AS)
-#     --create-snapshot   (x86+AS kc, boot.efi only for x86)
-#     --last-sealed-snapshot (x86+AS)
-#     --snapshot          (x86+AS)
-#     --verbose
-#     --apfsdriver?     (x86 only, not needed for T2, and AS)
-#     --file?
+# For --garbagecollect:
+#    It will delete all nsih dirs that aren't either currently booted from,
+#    or aren't currently referenced by the volume's local policy.
+#    If you're operating on a non-boot volume that doesn't have a local policy
+#    set for it, then gc will delete all nsih dirs it can find.
 #
-#  MOUNT mode options:
-#     --mount directory
-#     --bootefi
-#     --setBoot (XXX after verfiy, set it back to the original system root)
-#     --nextonly
-#     --personalize
-#     --create-snapshot   (x86+AS kc, boot.efi only for x86)
-#     --last-sealed-snapshot (x86+AS)
-#     --verbose
-#     --apfsdriver?     (x86 only, not needed for T2, and AS)
-#     --noapfsdriver?   (x86 only)
+#    'nsih' numbers are the hex digits of the next-stage-image-hash (nsih).
+#    The nsih can be calculated by bless2_install_with_args API, but it can also
+#    be retrieved from libbootpolicy.
+#    e.g. the 9F6EF6B*9979 is the nsih number in
+#    "/System/Volumes/Preboot/<guuid>/boot/9F6EF6B2088BA3887881B67056F54F9BC64B7DFF4D97C1BC0BCFC3CBCF480DBF3FA206F9B8B8D318768F59AB969979"
+#    The nsih is literally just a SHA-384 hash of the OS manifest which is used
+#    to stitch the boot objects. So if you take the manifest that pass to
+#    bless2_install_with_args and do a shasum -a 384 on it, then the result
+#    should match the directory name inside the boot directory.
 #
-#  INFO mode options: (x86 only)
-#     --info [directory]
-#     --getBoot
-#     --plist
-#     --verbose
-#     --version
+# For --custominstall --bootobjectpayload <file>:
+#    XXX Not testing this API
+#    The usage for --custominstall is that KernelManagement will be creating
+#    a payload as part of the kcgen workflow.  KM then hands it to this
+#    bless2 API, bless2_install_custom_obj(), in order to get it stitched
+#    and installed.  It's not clear how this test program can actually trigger
+#    this workflow. Can not just hand it some dummy im4p, because that won't be
+#    part of the local policy, so bless2 will fail when it tries to get the
+#    manifest for it.
+#
 #===========================================================
 
-
-#======================================
-#    FOLDER MODE
-#======================================
-
 #
-# Set a folder of a dummy ROSV
-#  --folder <volume-folder> --bootefi --verbose
+#  bless2cli --setboot --device <device>
+#  On a dummy ARV (Sealed System Volume)
 #
-def test_folder_rosv(testname):
-    srcopts = ['', TYPE_SRC_ROSV, '', 0]
-    testflag = TESTFLAG_FOLDER | TESTFLAG_Bootefi | TESTFLAG_Verbose
-    test = Test(testname, testflag, srcopts)
-    test.run()
-
-
-#
-# Set a folder of a dummy single volume OS
-#  --folder <volume-folder> --bootefi --verbose
-#
-def test_folder_os(testname):
-    srcopts = ['', TYPE_SRC_OSVOL, '', 0]
-    testflag = TESTFLAG_FOLDER | TESTFLAG_Bootefi | TESTFLAG_Verbose
-    test = Test(testname, testflag, srcopts)
-    test.run()
-
-
-#
-# Create snapshot on a dummy ARV (Sealed System Volume)
-# --folder <volume-folder> --create-snapshot --bootefi --verbose
-#
-def test_folder_snap_arv(testname):
+def test_setboot_arv(testname):
     srcopts = ['', TYPE_SRC_ROSV, '', FLAG_SRC_SSV]
-    testflag = TESTFLAG_FOLDER | TESTFLAG_CreateSnap | TESTFLAG_Bootefi | TESTFLAG_Verbose
-    test = Test(testname, testflag, srcopts)
-    test.run()
-
-
-#======================================
-#    MOUNT MODE
-#======================================
-
-#
-# mount a dummy ROSV
-#  --mount <mntpt> --bootefi --verbose
-#
-def test_mount_rosv(testname):
-    srcopts = ['', TYPE_SRC_ROSV, '', 0]
-    testflag = TESTFLAG_MOUNT | TESTFLAG_Bootefi | TESTFLAG_Verbose
+    testflag = TESTFLAG_SetBoot
     test = Test(testname, testflag, srcopts)
     test.run()
 
 
 #
-# mount a dummy single volume OS
-#  --mount <mntpt> --bootefi --verbose
+#  bless2cli --setboot --bootonce --device <device>
+#  On a dummy ARV (Sealed System Volume)
 #
-def test_mount_os(testname):
-    srcopts = ['', TYPE_SRC_OSVOL, '', 0]
-    testflag = TESTFLAG_MOUNT | TESTFLAG_Bootefi | TESTFLAG_Verbose
-    test = Test(testname, testflag, srcopts)
-    test.run()
-
-
-# 
-# Create snapshot on a dummy ARV (Sealed System Volume)
-# --mount <mntpt> --create-snapshot --bootefi --verbose
-#
-def test_mount_snap_arv(testname):
+def test_setbootonce_arv(testname):
     srcopts = ['', TYPE_SRC_ROSV, '', FLAG_SRC_SSV]
-    testflag = TESTFLAG_MOUNT | TESTFLAG_CreateSnap | TESTFLAG_Bootefi | TESTFLAG_Verbose
+    testflag = TESTFLAG_SetBoot | TESTFLAG_BootOnce
     test = Test(testname, testflag, srcopts)
     test.run()
 
 
-#======================================
-#    INFO MODE - x86 only
-#======================================
 #
-# On a dummy ROSV OS
-# --info <dir> --getBoot
+#  bless2cli --setboot --device <device>
+#  On a dummy non-ARV
 #
-def test_info_rosv(testname):
+def test_setboot_rosv(testname):
     srcopts = ['', TYPE_SRC_ROSV, '', 0]
-    testflag = TESTFLAG_INFO | TESTFLAG_GetBoot
+    testflag = TESTFLAG_SetBoot
     test = Test(testname, testflag, srcopts)
     test.run()
 
 
 #
-# On a dummy ARV (Sealed System Volume)
-# --info <dir> --getBoot
+#  bless2cli --install --device <device>  [--bootcachesfile <file>]
+#        [--srcdirpath <path>] [--dstdirpath <path>] [--osmanifestpath <path>]
+#        [--variant <option>] [--overrideuuid]
+#  On a dummy ARV (Sealed System Volume)
 #
-def test_info_arv(testname):
+def test_install_arv(testname):
     srcopts = ['', TYPE_SRC_ROSV, '', FLAG_SRC_SSV]
-    testflag = TESTFLAG_INFO | TESTFLAG_GetBoot
+    testflag = TESTFLAG_Install
     test = Test(testname, testflag, srcopts)
     test.run()
 
 
 #
-# On a dummy single volume OS
-# --info <dir> --getBoot
+#  bless2cli --getiscpreboot --device <device>
+#  On a dummy ARV (Sealed System Volume)
 #
-def test_info_os(testname):
-    srcopts = ['', TYPE_SRC_OSVOL, '', 0]
-    testflag = TESTFLAG_INFO | TESTFLAG_GetBoot
+#  XXX verify with "ioreg -l"?
+#
+def test_getiscpreboot_arv(testname):
+    srcopts = ['', TYPE_SRC_ROSV, '', FLAG_SRC_SSV]
+    testflag = TESTFLAG_GetIscPreboot
+    test = Test(testname, testflag, srcopts)
+    test.run()
+
+
+#
+#  bless2cli --getospreboot --device <device>
+#  On a dummy ARV (Sealed System Volume)
+#
+def test_getospreboot_arv(testname):
+    srcopts = ['', TYPE_SRC_ROSV, '', FLAG_SRC_SSV]
+    testflag = TESTFLAG_GetOsPreboot
+    test = Test(testname, testflag, srcopts)
+    test.run()
+
+
+#
+#  bless2cli --garbagecollect --device <device>
+#  On a dummy ARV (Sealed System Volume)
+#
+def test_garbagecollect_arv(testname):
+    srcopts = ['', TYPE_SRC_ROSV, '', FLAG_SRC_SSV]
+    testflag = TESTFLAG_GarbageCollect
+    test = Test(testname, testflag, srcopts)
+    test.run()
+
+
+#
+#  bless2cli --customupdate --device <device>
+#  On a dummy ARV (Sealed System Volume)
+#
+def test_customupdate_arv(testname):
+    srcopts = ['', TYPE_SRC_ROSV, '', FLAG_SRC_SSV]
+    testflag = TESTFLAG_CustomUpdate
+    test = Test(testname, testflag, srcopts)
+    test.run()
+
+
+#
+#  bless2cli --getbootpath --device <device>
+#  On a dummy ARV (Sealed System Volume)
+#
+def test_getbootpath_arv(testname):
+    srcopts = ['', TYPE_SRC_ROSV, '', FLAG_SRC_SSV]
+    testflag = TESTFLAG_GetBootpath
     test = Test(testname, testflag, srcopts)
     test.run()
 
@@ -2505,536 +2627,6 @@ def test_info_os(testname):
 #======================================
 #    NEGATIVE TEST CASES
 #======================================
-#
-# --create-snapshot is not allowed on a Data Volume of ARV (Sealed System Volume)
-#
-def test_neg_mount_snap_arvdata(testname):
-    srcopts = ['', TYPE_SRC_ROSV, '', FLAG_SRC_SSV]
-    testflag = TESTFLAG_MOUNT | TESTFLAG_OnDataVol | TESTFLAG_CreateSnap
-    test = Test(testname, testflag, srcopts)
-    test.run()
-
-
-#
-# --create-snapshot is not allowed on non-ARV system, nor Data roled volume
-#
-def test_neg_mount_snap_rosvdata(testname):
-    srcopts = ['', TYPE_SRC_ROSV, '', 0]
-    testflag = TESTFLAG_MOUNT | TESTFLAG_OnDataVol | TESTFLAG_CreateSnap
-    test = Test(testname, testflag, srcopts)
-    test.run()
-
-
-#
-# --create-snapshot is not allowed on non-ARV system
-#
-def test_neg_mount_snap_os(testname):
-    srcopts = ['', TYPE_SRC_OSVOL, '', 0]
-    testflag = TESTFLAG_MOUNT | TESTFLAG_CreateSnap
-    test = Test(testname, testflag, srcopts)
-    test.run()
-
-
-#
-# --folder --create-snapshot not allowed on a Data Volume of ARV (Sealed System Volume)
-#
-def test_neg_folder_snap_arvdata(testname):
-    srcopts = ['', TYPE_SRC_ROSV, '', FLAG_SRC_SSV]
-    testflag = TESTFLAG_FOLDER | TESTFLAG_OnDataVol | TESTFLAG_CreateSnap
-    test = Test(testname, testflag, srcopts)
-    test.run()
-
-
-#
-# --folder --create-snapshot not allowed on non-ARV system
-#
-def test_neg_folder_snap_rosv(testname):
-    srcopts = ['', TYPE_SRC_ROSV, '', 0]
-    testflag = TESTFLAG_FOLDER | TESTFLAG_CreateSnap | TESTFLAG_Bootefi
-    test = Test(testname, testflag, srcopts)
-    test.run()
-
-#
-# --folder --create-snapshot not allowed on non-ARV system
-#
-def test_neg_folder_snap_os(testname):
-    srcopts = ['', TYPE_SRC_OSVOL, '', 0]
-    testflag = TESTFLAG_FOLDER | TESTFLAG_CreateSnap | TESTFLAG_Bootefi
-    test = Test(testname, testflag, srcopts)
-    test.run()
-
-#
-# --mount <mntpt> --last-sealed-snapshot not allowed on non-ARV system
-#
-def test_neg_mount_lastsnap_rosv(testname):
-    srcopts = ['', TYPE_SRC_ROSV, '', 0]
-    testflag = TESTFLAG_MOUNT | TESTFLAG_LastSealedSnap
-    test = Test(testname, testflag, srcopts)
-    test.run()
-
-
-#
-# basic test ported from dmtest for verifying the basic functionalities
-#
-def test_bless_basic(testname):
-    imgVol2Name = getUniqName()
-    imgVol3Name = getUniqName()
-    imgPath = "/tmp/" + imgVol2Name
-    imgDiskVol2 = ""
-    imgDisk = ""
-    returnCOde = 0
-    savedNVRAM = [None, None]
-    bAS = False
-    bIS = False
-    testBegin("bless_basic")
-    logging.info("ImagePath:" + imgPath)
-    logging.info("ImageVol2Name:" + imgVol2Name + "; ImageVol3Name:" + imgVol3Name)
-
-    cmd = ['hdiutil', 'create', '-attach', '-type', 'SPARSEBUNDLE', '-size', '10g', '-fs', 'JHFS+', '-ov', '-volname', imgVol2Name, imgPath]
-    logging.info("call: i{}".format(cmd))
-    result = Popen(cmd, stdout=PIPE)
-    result = Popen(['grep', imgVol2Name], stdin=result.stdout, stdout=PIPE)
-    result = Popen(['grep', 'Apple_HFS'], stdin=result.stdout, stdout=PIPE)
-    out, err = result.communicate();
-    logging.info("'hdiutil create' returned: " + out)
-    if not out:
-        logging.error("Error code " + str(result.returncode) + " on 'hdiutil create'")
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    out = out.strip()
-    outs = out.split()
-    imgDiskVol2 = outs[0].replace('/dev/', '')
-    imgDisk = imgDiskVol2[:-2]
-    logging.info("disk vol2: " + imgDiskVol2 + ", name: " + imgDisk)
-
-    # sink the volume and create a other one
-    docmd(['diskutil', 'resizeVolume', imgDiskVol2, '5G'])
-    docmd(['diskutil', 'addPartition', imgDiskVol2, 'ExFAT', imgVol3Name, '0'])
-    print("call: diskutil list")
-    cmd = ['diskutil', 'list', imgDisk]
-    result = Popen(cmd, stdout=PIPE)
-    result = Popen(['grep', imgVol3Name], stdin=result.stdout, stdout=PIPE)
-    out, err = result.communicate();
-    logging.info("diskutil resizeVolume/addPartition output: " + out)
-    if not out:
-        logging.error("diskutil resizeVolume/addPartition failed")
-        return endBlessBasic(-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    outs = out.split()
-    ind = len(outs)
-    imgDiskVol3 = outs[ind - 1]
-    logging.info("imgDiskVol3: " + imgDiskVol3)
-
-    # create container with one volume in it
-    ret, containerDisk, containerVol1Disk, containerVol1Name = createContainer(imgDisk, imgDiskVol3)
-    logging.info("container created: " + str(ret) + ", " + containerDisk + ", " + containerVol1Disk + ", " + containerVol1Name)
-    if ret != 0:
-        logging.error("Failed to create container")
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    cmd = ['diskutil', 'mount', containerVol1Disk]
-    docmd (cmd)
-
-    print("call: mount")
-    result = Popen(['mount'], stdout=PIPE)
-    result = Popen(['grep', containerVol1Disk], stdin=result.stdout, stdout=PIPE)
-    result = Popen(['grep', containerVol1Name], stdin=result.stdout, stdout=PIPE)
-    out, err = result.communicate()
-    logging.info("mount container volume1 result: " + out)
-    if not out:
-        logging.error("Failed to mount container volume 1: " + containerVol1Disk)
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    out = remSpecialChars(out, [chr(0xe2), chr(0x81), chr(0xa9), chr(0xa8)])
-    outs = out.split()
-    ind = len(outs)
-    if ind < 3:
-        logging.error("Failed to find out mounted container volume 1: " + containerVol1Disk)
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    mountPoint = outs[2]
-    logging.info("mount point for '" + containerVol1Disk + " is " + mountPoint)
-
-    docmd(['mkdir', '-p', mountPoint + '/System/Library/CoreServices'])
-    docmd(['cp', '/System/Library/CoreServices/SystemVersion.plist', mountPoint + '/System/Library/CoreServices/'])
-
-    # check the file
-    if not checkFileDirExist(mountPoint + '/System/Library/CoreServices/SystemVersion.plist') :
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    plist, ret = docmd_plist(['diskutil', 'info', '-plist', containerVol1Disk])
-    if ret != 0:
-        logging.error("'diskutil info -plist' faled with error code " + str(ret))
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    containerVol1UUID = plist['VolumeUUID']
-    logging.info("Volume1UUID: " + containerVol1UUID)
-
-    docmd(['mkdir', '-p', mountPoint + '/System/Library/CoreServices'])
-    docmd(['cp', '/System/Library/CoreServices/boot.efi', mountPoint + '/System/Library/CoreServices/'])
-    # check the file
-    if not checkFileDirExist(mountPoint + '/System/Library/CoreServices/boot.efi') :
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    docmd(['mkdir', '-p', mountPoint + '/usr/standalone/i386'])
-    docmd(['cp', '/usr/standalone/i386/apfs.efi', mountPoint + '/usr/standalone/i386/'])
-    # check the file
-    if not checkFileDirExist(mountPoint + '/usr/standalone/i386/apfs.efi') :
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    # bless test start here
-    cmd = ['bless', '--folder', mountPoint + '/usr/standalone/i386']
-    logging.info("call: {}".format(cmd))
-    result = Popen(cmd, stdout=PIPE, stderr=PIPE)
-    out, err = result.communicate()
-    if not result.returncode :
-        logging.error("bless --folder should not return code 0")
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    if not err:
-        logging.error("bless command: {}".format(cmd) + " should return error")
-        return endBlessBasic (-1, imgDisk, bIS, bAS, savedNVRAM)
-    else :
-       msgs =  ['No preboot volume associated with device', containerVol1Disk, mountPoint]
-       if not verifyCmdOutputForStrngs(err, msgs, "verifying error message from 'bless --folder'") :
-           return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    # add preboot volume to the container
-    ############################################
-    ret, containerVol2Disk, containerVol2Name = addVolumeToContainer (containerDisk, 'B')
-    if ret != 0:
-        logging.error("Failed to create preboot voloume in container: " + containerDisk)
-        return endBlessBasic (-1, imgDisk, bIS, bAS, savedNVRAM)
-
-    cmd = ['diskutil', 'mount', containerVol2Disk]
-    docmd (cmd)
-
-    result = Popen(['mount'], stdout=PIPE)
-    result = Popen(['grep', containerVol2Disk], stdin=result.stdout, stdout=PIPE)
-    result = Popen(['grep', containerVol2Name], stdin=result.stdout, stdout=PIPE)
-    out, err = result.communicate()
-    logging.info("look for mount point for " + containerVol2Disk)
-    logging.info("out: " + out)
-    if not out or err:
-        logging.error("failed to find the mount point")
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    out = remSpecialChars(out, [chr(0xe2), chr(0x81), chr(0xa9), chr(0xa8)])
-    outs = out.split()
-    ind = len(outs)
-    if ind < 3:
-        logging.error("mount point not found")
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    mountPointPreboot = outs[2]
-    logging.info("mount point preboot: " + mountPointPreboot)
-
-    docmd(['mkdir', '-p', mountPointPreboot+ '/' + containerVol1UUID + '/System/Library/CoreServices'])
-    docmd(['cp', '/System/Library/CoreServices/SystemVersion.plist', mountPointPreboot + '/' + containerVol1UUID + '/System/Library/CoreServices'])
-    # check if uuid folder exists
-    if not checkFileDirExist(mountPointPreboot + "/" + containerVol1UUID) :
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    # check SystemVersion.plist exists
-    if not checkFileDirExist(mountPointPreboot + "/" + containerVol1UUID + '/System/Library/CoreServices/SystemVersion.plist') :
-        return endBlessBasic (-1, imgDisk, bIS, bAS, savedNVRAM)
-
-    # check boot.eif does not exist
-    if checkFileDirExist(mountPointPreboot + "/" + containerVol1UUID + '/System/Library/CoreServices/boot.efi') :
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    result = Popen(['nvram', '-p'], stdout=PIPE)
-    result = Popen(['grep', 'efi-boot-device\t'], stdin=result.stdout, stdout=PIPE)
-    out, err = result.communicate()
-    logging.info("search for 'efi-boot-device' in 'nvram -p' output")
-    logging.info("out: {}".format(out))
-
-    result = Popen(['nvram', '-p'], stdout=PIPE)
-    result = Popen(['grep', 'boot-volume\t'], stdin=result.stdout, stdout=PIPE)
-    out1, err = result.communicate()
-    logging.info("search for 'boot-volume' in 'nvram -p' output")
-    logging.info("out: {}".format(out1))
-    savedNVRAM = [out, out1]
-
-    if (out and len(out) > 100) :
-        needToRestoreNVRAM_EFIBOOTDEVICE_IS = True
-    else :
-        needToRestoreNVRAM_EFIBOOTDEVICE_IS = False
-
-    if  (out1 and len(out1) > 30) :
-        needToRestoreNVRAM_BOOTVOLUME_AS = True
-    else :
-        needToRestoreNVRAM_BOOTVOLUME_AS = False
-
-    bIS = needToRestoreNVRAM_EFIBOOTDEVICE_IS
-    bAS = needToRestoreNVRAM_BOOTVOLUME_AS
-
-    logging.info("needToRestoreNVRAM_EFIBOOTDEVICE_IS: " + str(needToRestoreNVRAM_EFIBOOTDEVICE_IS))
-    logging.info("needToRestoreNVRAM_BOOTVOLUME_AS: " + str(needToRestoreNVRAM_BOOTVOLUME_AS))
-    if not needToRestoreNVRAM_EFIBOOTDEVICE_IS and not needToRestoreNVRAM_BOOTVOLUME_AS :
-        logging.error("efi-boot or boot-volume info does not set in nvram")
-        return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    # Do the following set-nvram-feature-of-bless test for Intel Macintosh machines (Apple Silicon machines use a different,
-    # new, "bless" program to be called bootutil):
-    if needToRestoreNVRAM_EFIBOOTDEVICE_IS :
-        # BEGIN SPECIFIC SECTION:
-        logging.info("BEGIN: Intel Macintosh - specific section")
-        print("BEGIN: Intel Macintosh - specific section")
-        # bless --folder /Volumes/<SIMSYS>/System/Library/CoreServices --gootefi /Volumes/<SIMSYS>/System/Library/CoreServices/boot.efi -setBoo
-        # We will expect that to succeed:
-        cmd = ['bless', '--folder',  mountPoint + '/System/Library/CoreServices', '--bootefi', mountPoint +  '/System/Library/CoreServices/boot.efi', '--setBoot']
-        logging.info("call: {}".format(cmd))
-        result = Popen(cmd, stdout=PIPE, stderr=PIPE)
-        out, err = result.communicate()
-        logging.info("out: " + out)
-        logging.info("err: " + err)
-
-        if result.returncode != 0 :
-            logging.error("'bless --folder --bootefi' failed with exit code: " + str( result.returncode))
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        if out and len(out) > 0:
-            logging.error("'bless --folder --bootefi' returned invalid data")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        # check if uuid folder exists
-        if not checkFileDirExist(mountPointPreboot + "/" + containerVol1UUID) :
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        # check boot.eif does exist
-        if not checkFileDirExist(mountPointPreboot + "/" + containerVol1UUID + '/System/Library/CoreServices/boot.efi') :
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        # get volume 2 UUID
-        plist, ret = docmd_plist(['diskutil', 'info', '-plist', containerVol2Disk])
-        if ret != 0:
-            logging.error("'diskutil info -plist' faled with error code " + str(ret))
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        containerVol2UUID = plist['VolumeUUID']
-        logging.error("Volume2UUID: " + containerVol2UUID)
-
-        # Look at the current NVRAM EFI boot setting, now that bless has run successfully. It should be in dict format:
-        logging.info("look at updated-by-bless NVRAM boot settings")
-        result = Popen(['nvram', '-p'], stdout=PIPE, stderr=PIPE)
-        result = Popen(['grep', 'efi-boot-device\\t'], stdin=result.stdout, stdout=PIPE)
-        out, err = result.communicate()
-        # Get output, loosely requiring a minimum amount of output chars of what should "nvram -p" output:
-        logging.info("'nvram -p' output: " + out)
-        if not out or len(out) < 100 :
-            logging.error("'nvram -p' output has no expected data")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        if out.find("efi-boot-device") != 0:
-            logging.error("'nvram -p' output has no prefix 'efi-boot-device'")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("nvram -p' output roughly OK")
-        # We can check for more precise output later, but for now, do a few loose spot checks on dict content:
-	strs = [containerVol1UUID, containerVol2UUID, containerVol2Disk]
-        if not verifyCmdOutputForStrngs(out, strs, "verifying efi-boot-device setting ('nvram -p' output)") :
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verify some efi-boot-device elements ")
-        if out.find("\\System\\Library\\CoreServices\\boot.efi") < 0 :
-            logging.error("'nvram -p' output has no element \\System\\Library\\CoreServices\\boot.efi")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        # Do a bless command:  bless --getBoot
-        logging.info("test 'bless --getBoot'")
-        result = Popen(['bless', '--getBoot'], stdout=PIPE, stderr=PIPE)
-        out, err = result.communicate()
-
-        logging.info("verified that the exit status of the last bless command is ZERO thus indicates success")
-        if result.returncode != 0 :
-            logging.error("'bless --getBoot' return error: " + str(result.returncode) + ", " + err)
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("checking 'bless --getBoot' output: " + out)
-        if not out or len(out) < 10 or len(out) > 16 :
-            logging.error("'bless --getBoot' output data not expected" )
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verify that there is reasonable bless stdout for --getBoot")
-        if out.find("/dev/" + containerVol1Disk) != 0 :
-            logging.error("'bless --getBoot' output data not expected" )
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        # Do a bless command:  bless --info
-        logging.info("\ntest 'bless --info'")
-        result = Popen(['bless', '--info'], stdout=PIPE, stderr=PIPE)
-        out, err = result.communicate()
-
-        logging.info("verified that the exit status of the last bless command is ZERO thus indicates success")
-        if result.returncode != 0 :
-            logging.error("'bless --info' return error: " + str(result.returncode) + ", " + err)
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        # Get the output string and check it very roughly for basic size:
-        logging.info("verifying 'bless --info' output: " + out)
-        if not out or len(out) < 100 or len(out) > 2500 :
-            logging.error("'bless --info' output data not expected" )
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        # check roughly for the bless --info output for some reasonal contents
-        strs = ["Blessed System File is", "Blessed System Folder is", "The blessed volume in this APFS container is", containerVol1UUID + "/System/Library/CoreServices/boot.efi"]
-        if not verifyCmdOutputForStrngs(out, strs, "verifying 'bless --info' output") :
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        # Do a bless command:  bless --info /Volumes/SIMSYS/System/Library/CoreServices --plist
-        logging.info("bless --info /Volumes/SIMSYS/System/Library/CoreServices --plist")
-        cmd = ['bless', '--info', mountPoint + '/System/Library/CoreServices', '--plist']
-        logging.info("call: {}".format(cmd))
-        result = Popen(cmd, stdout=PIPE, stderr=PIPE)
-        out, err = result.communicate()
-
-        logging.info("verified that the exit status of the last bless command is ZERO thus indicates success")
-        if result.returncode != 0 :
-            logging.error("'bless --info SLC --plist' return error: " + str(result.returncode) + ", " + err)
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("'bless --info SLC --plist' output: " + out )
-        logging.info("verify 'bless --info SLC --plist' output data size" )
-        if not out or len(out) < 100 or len(out) > 6000 :
-            logging.error("'bless --info SLC --plist' output data not expected")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output stringr1" )
-        if out.find("plist version=") < 0 :
-            logging.error("'bless --info SLC --plist' output should contains 'plist version='")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output stringr2" )
-        if out.find("</plist>") < 0 :
-            logging.error("'bless --info SLC --plist' output should contains '</plist>'")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output stringr3" )
-        if out.find("Directory ID") < 0 :
-            logging.error("'bless --info SLC --plist' output should contains 'Directory ID'")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        plist = plistlib.readPlistFromString(out)
-        logging.info("verifying 'bless --info SLC --plist' output as plist")
-        if not plist :
-            logging.error("'bless --info SLC --plist' output should be plist dictionary")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist key1")
-        aux = plist['Auxiliary Partitions'] != []
-        if aux == None  :
-            logging.error("'bless --info SLC --plist' output plist should have 'Auxiliary Partitions'")
-            # return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist key2")
-        arr =  plist['Bless Info']
-        if not arr  :
-            logging.error("'bless --info SLC --plist' output plist should have 'Bless Info'")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist key2 arr size")
-        if len(arr) != 2 :
-            logging.error("'bless --info SLC --plist' output plist should have 'Bless Info' as size two array")
-            endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist key2 arr data1")
-        if not arr[0]['Directory ID'] or not arr[1]['Directory ID'] :
-            logging.error("'bless --info SLC --plist' output plist should have 'Bless Info' and both entries should have 'Directory ID'")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist key2 arr data2")
-        if not arr[0]['Path'] or not arr[1]['Path'] :
-            logging.error("'bless --info SLC --plist' output plist should have 'Bless Info' and both entries should have 'Path'")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist key2 arr data3")
-        aPath = mountPointPreboot + "/" + containerVol1UUID + '/System/Library/CoreServices'
-        if arr[0]['Path'].find(aPath) < 0 or arr[1]['Path'].find(aPath) < 0 :
-            logging.error("'bless --info SLC --plist' output plist should have 'Bless Info' and both entries should have 'Path' and all the paths should have SLC")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist key2 arr data4")
-        aPath = mountPointPreboot + "/" + containerVol1UUID + '/System/Library/CoreServices/boot.efi'
-        # at least one path has boot.efi
-        if arr[0]['Path'].find(aPath) < 0 and arr[1]['Path'].find(aPath) < 0 :
-            logging.error("'bless --info SLC --plist' output plist should have 'Bless Info' and both entries should have 'Path' and one path should have boot.efi")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist key2 arr data5")
-        # only one path has boot.efi
-	if arr[0]['Path'].find(aPath) >= 0 and arr[1]['Path'].find(aPath) >= 0 :
-            logging.error("'bless --info SLC --plist' output plist should have 'Bless Info' and both entries should have 'Path' and only one path should have boot.efi")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist Data Partitions")
-	if not plist['Data Partitions'] :
-            logging.error("'bless --info SLC --plist' output plist should have 'Data Partitions'")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist Data Partitions array")
-	if len(plist['Data Partitions']) != 1 :
-            logging.error("'bless --info SLC --plist' output plist should have 'Data Partitions' with one elm")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist Data Partitions array data")
-	if plist['Data Partitions'][0] != containerVol1Disk :
-            logging.error("'bless --info SLC --plist' output plist should have 'Data Partitions' with one elm :" + containerVol1Disk)
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist Preboot Volumes")
-        if not plist['Preboot Volumes'] :
-            logging.error("'bless --info SLC --plist' output plist should have 'Preboot Volumes'")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist Preboot Volumes array")
-        if len(plist['Preboot Volumes']) != 1 :
-            logging.error("'bless --info SLC --plist' output plist should have 'Preboot Volumes' with one elm")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist Preboot Volumes array data")
-        if plist['Preboot Volumes'][0] != containerVol2Disk :
-            logging.error("'bless --info SLC --plist' output plist should have 'Preboot Volumes' with one elm :" + containerVol2Disk)
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info SLC --plist' output plist Systen Partitions")
-        if not plist['System Partitions'] :
-            logging.error("'bless --info SLC --plist' output plist should have 'System Partitions'")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-    if needToRestoreNVRAM_BOOTVOLUME_AS :
-        # Apple Silicon Mac - specific section
-        logging.info("Apple Silic Mac - specific section:")
-        print "Apple Silic Mac - specific section:"
-        logging.info("Apple Silic Mac - specific section:")
-        result = Popen(['bless', '--info'], stdout=PIPE, stderr=PIPE)
-        out, err = result.communicate()
-
-        logging.info("verifying 'bless --info' return code ")
-        if result.returncode != 1 and result.returncode != 2 :
-            logging.error("'bless --info' return exit status " + str(result.returncode) + " but expected value is 2")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("verifying 'bless --info' output error ")
-        if not err or len(err) < 1 :
-            logging.error("'bless --info' should return errors")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("error message from bless --info: " + err)
-        if err.find("Can't interpret boot-volume") < 0 and \
-           err.find("Unknown preboot environment") < 0 and \
-           not (err.find("Volume for path ") == 0 and err.find(" is not available") > 0) :
-
-            logging.error("last bless command does not return a specific error message")
-            return endBlessBasic (-1, imgDisk, imgPath, bIS, bAS, savedNVRAM)
-
-        logging.info("END: Apple Silicon Mac - specific section")
-
-    if needToRestoreNVRAM_BOOTVOLUME_AS :
-        logging.info("bootutil testing should go here in the future")
-
-    # normal exit
-    return endBlessBasic (0, imgDisk, imgPath, bIS, bAS, savedNVRAM)
 
 
 #======================================
@@ -3043,7 +2635,7 @@ def test_bless_basic(testname):
 #
 # bless GoldenGate OS restored from asr
 #
-def test_mount_goldengate(testname):
+def test_goldengate(testname):
     print 'XXX TBD'
 
 
@@ -3058,43 +2650,24 @@ def test_mount_goldengate(testname):
 #    value = (test function, flag, test description)
 #
 TestListDictionary = {
-    'folder_rosv': (test_folder_rosv, 'presubmit',
-        'bless folder on a dummy ROSV'),
-    'folder_os': (test_folder_os, 'presubmit',
-        'bless folder on a dummy single volume OS'),
-    'folder_snap_arv': (test_folder_snap_arv, 'presubmit',
-        'bless folder create-snapshot on a dummy ARV'),
-    'mount_rosv': (test_mount_rosv, 'presubmit',
-        'bless mount on a dummy ROSV'),
-    'mount_os': (test_mount_os, 'presubmit',
-        'bless mount on a dummy single volume OS'),
-    'mount_snap_arv': (test_mount_snap_arv, 'presubmit',
-        'bless mount create-snapshot on a dummy ARV'),
-    'info_rosv': (test_info_rosv, 'presubmit',
-        'bless info on a dummy ROSV'),
-    'info_arv': (test_info_arv, 'presubmit',
-        'bless info on a dummy ARV'),
-    'info_os': (test_info_os, 'presubmit',
-        'bless info on a dummy single volume OS'),
-    'bless_basic': (test_bless_basic, 'presubmit',
-        'basic bless call for different volume types'),
-    'neg_mount_snap_arvdata': (test_neg_mount_snap_arvdata, 'presubmit',
-	'--create-snapshot not allowed on Data Volume in ARV'),
-    'neg_mount_snap_rosvdata': (test_neg_mount_snap_rosvdata, 'presubmit',
-	'--mount --create-snapshot not allowed on non-ARV system'),
-    'neg_mount_snap_os': (test_neg_mount_snap_os, 'presubmit',
-	'--mount --create-snapshot not allowed on non-ARV system'),
-    'neg_mount_lastsnap_rosv': (test_neg_mount_lastsnap_rosv, 'presubmit',
-        '--mount --last-sealed-snapshot not allowed on non-ARV system'),
-    'neg_folder_snap_arvdata': (test_neg_folder_snap_arvdata, 'presubmit',
-	'--folder --create-snapshot not allowed on Data Volume in ARV'),
-    'neg_folder_snap_rosv': (test_neg_folder_snap_rosv, 'presubmit',
-	'--folder --create-snapshot not allowed on Non-ARV system'),
-    'neg_folder_snap_os': (test_neg_folder_snap_os, 'presubmit',
-	'--folder --create-snapshot not allowed on non-ARV system'),
-# XXX TBD
-#    'mount_goldengate': (test_mount_goldengate, 'remote',
-#        'bless after asr restores a GoldenGate ROSV'),
+    'setboot_arv': (test_setboot_arv, 'presubmit',
+        'bless2 setboot on a dummy ARV (Sealed System Volume)'),
+    'setbootonce_arv': (test_setbootonce_arv, 'presubmit',
+        'bless2 setboot once on a dummy ARV (Sealed System Volume)'),
+    'setboot_rosv': (test_setboot_rosv, 'presubmit',
+        'bless2 setboot on a dummy ROSV, non-ARV (not sealed volume group)'),
+    'install_arv': (test_install_arv, 'presubmit',
+        'bless2 install on a dummy ARV (Sealed System Volume)'),
+    'getiscpreboot_arv': (test_getiscpreboot_arv, 'presubmit',
+        'bless2 getiscpreboot on a dummy ARV (Sealed System Volume)'),
+    'getospreboot_arv': (test_getospreboot_arv, 'presubmit',
+        'bless2 getospreboot on a dummy ARV (Sealed System Volume)'),
+    'garbagecollect_arv': (test_garbagecollect_arv, 'presubmit',
+        'bless2 garbagecollect on a dummy ARV (Sealed System Volume)'),
+    'customupdate_arv': (test_customupdate_arv, 'presubmit',
+        'bless2 customupdate on a dummy ARV (Sealed System Volume)'),
+    'getbootpath_arv': (test_getbootpath_arv, 'presubmit',
+        'bless2 getbootpath on a dummy ARV (Sealed System Volume)'),
 }
 
 
@@ -3167,6 +2740,7 @@ def main():
     global ErrorPause
     global OSDIR, OSDIR_GOLDEN, OSDIR_JAZZ, OSDIR_LIB, XCODEDIR
     global SWEDMGname, DMGDIR
+    global isArm
 
     LocalMacOS = False
     # XXX use getopt/argparse in Python?
@@ -3200,6 +2774,15 @@ def main():
         log_cleanup()
         exit(0)
 
+    # This test is for bless2 on Apple Silicon systems
+    result = Popen(['/usr/bin/uname', '-p'], stdout=PIPE, stderr=PIPE)
+    out, errmsg = result.communicate()
+    isArm = out.startswith('arm')
+    if not isArm:
+         print 'This test must be run on Apple Silicon systems.'
+         print 'Please try again on an Apple Silicon system...'
+         exit(1)
+
     # Make sure logging is setup before using it
     Startup()
     testname = sys.argv[1]
@@ -3211,12 +2794,12 @@ def main():
         # Xcode dmg file is too big in XCODEDIR, so don't copy it yet.
         # If not enough space, let it skip and do it individually later.
         #
-    #    for dir in SWEDMGname.keys():
-    #        if dir == XCODEDIR:
-    #            continue
-    #        SWEDMGname[dir] = get_dmg_name(testname, dir)
-    #        if SWEDMGname[dir] == '':
-    #            exit(1)
+        # for dir in SWEDMGname.keys():
+        #     if dir == XCODEDIR:
+        #         continue
+        #     SWEDMGname[dir] = get_dmg_name(testname, dir)
+        #     if SWEDMGname[dir] == '':
+        #         exit(1)
 
     if LocalMacOS == True:
         home = expanduser("~")

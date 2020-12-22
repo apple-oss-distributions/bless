@@ -13,17 +13,17 @@
 			<true/>
 			<key>Command</key>
 			<array>
-				<string>/AppleInternal/CoreOS/tests/bless/test_bless</string>
+				<string>/AppleInternal/CoreOS/tests/bless/test_bless2</string>
 				<string>presubmit</string>
 			</array>
 			<key>TestName</key>
-			<string>bless_presubmit</string>
+			<string>bless2_presubmit</string>
 			<key>TestSpecificLogs</key>
 			<array>
 				<string>/Library/Logs/test_bless/bats_bless_presubmit.log</string>
 			</array>
 			<key>Timeout</key>
-			<integer>1200</integer>
+			<integer>1800</integer>
 		</dict>
 	</array>
 </dict>
