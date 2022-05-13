@@ -46,10 +46,9 @@ void usage(void) {
 "\t--help\t\tThis usage statement\n"
 "\n"
 "Info Mode:\n"
-#if !TARGET_CPU_ARM64
 "\t--info [dir]\tPrint blessing information for a specific volume, or the\n"
 "\t\t\tcurrently active boot volume if <dir> is not specified\n"
-#endif
+"\t\t\t(For Apple Silicon, --info option is only supported for external devices)\n"
 "\t--getBoot\tSuppress normal output and print the active boot volume\n"
 "\t--version\tPrint bless version number\n"
 "\t--plist\t\tFor any output type, use a plist representation\n"
@@ -74,7 +73,6 @@ void usage(void) {
 "\t--file file\tSet <file> as the blessed boot file\n"
 "\t--folder dir\tSet <dir> as the blessed directory\n"
 "\t--setBoot\tSet firmware to boot from this volume\n"
-"\t--openfolder dir\tSet <dir> to be the visible Finder directory\n"
 "\t--create-snapshot\t Create an APFS snapshot of this volume\n"
 "\t--last-sealed-snapshot\t Revert back to the previously signed APFS snapshot\n"
 "\t--verbose\tVerbose output\n"
@@ -132,6 +130,7 @@ void usage_short(void) {
 "\t[--setBoot] [--openfolder directory]\n"
 #if TARGET_CPU_ARM64
 "\t(--folder option is supported for external devices only on apple silicon)\n"
+"\t(--file option is supported for external devices only on apple silicon)\n"
 "\n"
 "bless --mount volume \n"
 #endif
@@ -144,9 +143,10 @@ void usage_short(void) {
 #if !TARGET_CPU_ARM64
 "bless --netboot --server url [--verbose]\n"
 "\n"
+#endif
 "bless --info [directory] [--getBoot] [--plist] [--verbose] [--version]\n"
-#else
-"bless  [--getBoot] [--plist] [--verbose] [--version]\n"
+#if TARGET_CPU_ARM64
+"\t(For Apple Silicon, --info option is only supported for external devices)\n"
 #endif
 ,
 	  stderr);

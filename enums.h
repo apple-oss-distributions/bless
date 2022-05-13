@@ -83,6 +83,7 @@ enum {
     kunbless,
     kuser,
     kuse9,
+    kusetdmasexternal,
     kverbose,
     kversion,
     ksnapshot,

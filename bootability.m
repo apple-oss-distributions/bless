@@ -53,7 +53,7 @@ NSString *_Nullable collectStringFromStdin(const unsigned int len)
 	char buf[len + 1]; // +1 for null terminator
 	bzero(&buf, sizeof(buf));
 	int i = 0;
-	char c = 0;
+	int c = 0;
 	while (i < len) {
 		c = getchar();
 		if (c == EOF || c == '\n') {
@@ -65,7 +65,7 @@ NSString *_Nullable collectStringFromStdin(const unsigned int len)
 		return nil;
 	
 	NSString *inputString = [NSString stringWithUTF8String:buf];
-	return [inputString stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	return inputString;
 }
 
 int blessViaBootability(BLContextPtr context, struct clarg actargs[klast])

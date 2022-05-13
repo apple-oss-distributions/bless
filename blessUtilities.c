@@ -1072,9 +1072,9 @@ static bool StringHasSuffix(const char *str, const char *suffix)
 	return strcmp(cmp, suffix) == 0;
 }
 
-#else
+#endif /* !TARGET_CPU_ARM64 */
 
-static int extractDiskFromMountPoint(BLContextPtr context, const char *mnt, char *disk, size_t disk_size) {
+int extractDiskFromMountPoint(BLContextPtr context, const char *mnt, char *disk, size_t disk_size) {
 	struct	statfs sb;
 	int		ret = 0;
 
@@ -1100,25 +1100,14 @@ static int extractDiskFromMountPoint(BLContextPtr context, const char *mnt, char
 	return ret;
 }
 
-int isMediaExternal(BLContextPtr context, const char *mnt, bool *external) {
-	char			bsdName[BSD_NAME_SIZE];
+int isMediaExternal(BLContextPtr context, const char *bsdName, bool *external) {
 	CFDictionaryRef	protocolChars = NULL;
 	CFStringRef		location = NULL;
 	io_service_t	service = IO_OBJECT_NULL;
 	io_service_t	blockStorageDevice = IO_OBJECT_NULL;
 	int ret = 0;
-
-	if (!mnt) {
-		blesscontextprintf(context, kBLLogLevelError,  "Invalid argument - mount point is NULL\n");
-		ret = EINVAL;
-		goto out;
-	}
-
-	if ((ret = extractDiskFromMountPoint(context, mnt, bsdName, BSD_NAME_SIZE)) != 0) {
-		blesscontextprintf(context, kBLLogLevelError, "Could not extract BSD name from mount point %s\n", mnt);
-		goto out;
-	}
-
+	*external = false;
+	
 	service = IOServiceGetMatchingService(kIOMasterPortDefault,
 										  IOBSDNameMatching(kIOMasterPortDefault, 0, bsdName));
 	if (!service) {
@@ -1163,23 +1152,12 @@ out:
 	return ret;
 }
 
-int isMediaRemovable(BLContextPtr context, const char *mnt, bool *removable) {
-	char			bsdName[BSD_NAME_SIZE];
+int isMediaRemovable(BLContextPtr context, const char *bsdName, bool *removable) {
 	CFDictionaryRef	removableProp = NULL;
 	io_service_t	service = IO_OBJECT_NULL;
 	int ret = 0;
+	*removable = false;
 
-	if (!mnt) {
-		blesscontextprintf(context, kBLLogLevelError,  "Invalid argument - mount point is NULL\n");
-		ret = EINVAL;
-		goto out;
-	}
-
-	if ((ret = extractDiskFromMountPoint(context, mnt, bsdName, BSD_NAME_SIZE)) != 0) {
-		blesscontextprintf(context, kBLLogLevelError,  "Could not extract BSD name from mount point %s\n", mnt);
-		goto out;
-	}
-	
 	service = IOServiceGetMatchingService(kIOMasterPortDefault,
 										  IOBSDNameMatching(kIOMasterPortDefault, 0, bsdName));
 	if (!service) {
@@ -1209,5 +1187,49 @@ out:
 
 	return ret;
 }
-#endif /* TARGET_CPU_ARM64 */
+
+int isMediaTDM(BLContextPtr context, const char *bsdName, bool *tdm)
+{
+	io_service_t		service = IO_OBJECT_NULL;
+	CFDictionaryRef		devChars = NULL;
+	CFBooleanRef		istdm = NULL;
+	int ret = 0;
+
+	*tdm = false;
+	
+	service = IOServiceGetMatchingService(kIOMasterPortDefault,
+										  IOBSDNameMatching(kIOMasterPortDefault, 0, bsdName));
+	if (!service) {
+		blesscontextprintf(context, kBLLogLevelError, "Failed to extract service from disk %s\n", bsdName);
+		ret = ENOENT;
+		goto out;
+	}
+	
+	devChars = (CFDictionaryRef)IORegistryEntrySearchCFProperty(service,
+																kIOServicePlane,
+																CFSTR(kIOPropertyDeviceCharacteristicsKey),
+																kCFAllocatorDefault,
+																kIORegistryIterateRecursively | kIORegistryIterateParents);
+	if (!devChars) {
+		blesscontextprintf(context, kBLLogLevelError, "Failed to find device characteristics for: %s\n", bsdName);
+		ret = ENOENT;
+		goto out;
+	}
+
+	istdm = CFDictionaryGetValue (devChars, CFSTR (kIOPropertyTargetDiskModeKey));
+	if (istdm) {
+		*tdm = CFBooleanGetValue(istdm);
+	}
+out:
+	if (devChars) {
+		CFRelease(devChars);
+	}
+	if (service) {
+		IOObjectRelease(service);
+	}
+
+	return ret;
+}
+
+
 
