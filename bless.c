@@ -37,6 +37,7 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <paths.h>
 #include <err.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
@@ -64,13 +65,11 @@ static struct option longopts[] = {
 { "alternateOS",    required_argument,      0,              kalternateos},
 { "allowUI",        no_argument,            0,              kallowui},
 { "bootinfo",       optional_argument,      0,              kbootinfo},
-{ "bootefi",		optional_argument,      0,              kbootefi},
-{ "bootBlockFile",  required_argument,      0,              kbootblockfile },
-{ "bootblockfile",  required_argument,      0,              kbootblockfile },
+{ "bootefi",        optional_argument,      0,              kbootefi},
 { "booter",         required_argument,      0,              kbooter },
-{ "create-snapshot",no_argument,			0,              kcreatesnapshot },
+{ "create-snapshot",no_argument,            0,              kcreatesnapshot },
 { "device",         required_argument,      0,              kdevice },
-{ "firmware",       required_argument,      0,              kfirmware },	
+{ "firmware",       required_argument,      0,              kfirmware },
 { "file",           required_argument,      0,              kfile },
 { "folder",         required_argument,      0,              kfolder },
 { "folder9",        required_argument,      0,              kfolder9 },
@@ -82,7 +81,7 @@ static struct option longopts[] = {
 { "kernelcache",    required_argument,      0,              kkernelcache },
 { "label",          required_argument,      0,              klabel },
 { "labelfile",      required_argument,      0,              klabelfile },
-{ "last-sealed-snapshot",no_argument,	    0,              klastsealedsnapshot },
+{ "last-sealed-snapshot",no_argument,       0,              klastsealedsnapshot },
 { "legacy",         no_argument,            0,              klegacy },
 { "legacydrivehint",required_argument,      0,              klegacydrivehint },
 { "mkext",          required_argument,      0,              kmkext },
@@ -92,11 +91,12 @@ static struct option longopts[] = {
 { "noapfsdriver",   no_argument,            0,              knoapfsdriver},
 { "openfolder",     required_argument,      0,              kopenfolder },
 { "options",        required_argument,      0,              koptions },
+{ "passpromt",      no_argument,            0,              kpasspromt },
 { "payload",        required_argument,      0,              kpayload },
-{ "personalize",    no_argument,			0,              kpersonalize },
+{ "personalize",    no_argument,            0,              kpersonalize },
 { "plist",          no_argument,            0,              kplist },
 { "quiet",          no_argument,            0,              kquiet },
-{ "recovery",		no_argument,            0,              krecovery },
+{ "recovery",        no_argument,           0,              krecovery },
 { "reset",          no_argument,            0,              kreset },
 { "save9",          no_argument,            0,              ksave9 },
 { "saveX",          no_argument,            0,              ksaveX },
@@ -106,8 +106,11 @@ static struct option longopts[] = {
 { "setOF",          no_argument,            0,              ksetboot }, // legacy option name
 { "shortform",      no_argument,            0,              kshortform },
 { "startupfile",    required_argument,      0,              kstartupfile },
+{ "stdinpass",      no_argument,            0,              kstdinpass },
 { "unbless",        required_argument,      0,              kunbless },
+{ "user",           required_argument,      0,              kuser },
 { "use9",           no_argument,            0,              kuse9 },
+{ "use-tdm-as-external", no_argument,       0,              kusetdmasexternal },
 { "verbose",        no_argument,            0,              kverbose },
 { "version",        no_argument,            0,              kversion },
 { "snapshot",       required_argument,      0,              ksnapshot },
@@ -118,6 +121,41 @@ extern char *optarg;
 extern int optind;
 extern char blessVersionString[];
 char blessVersionNumString[64];
+BLPreBootEnvType firmwareType;
+
+BLPreBootEnvType getPrebootType(void) {
+    return firmwareType;
+}
+
+static void blessHandleArgument(char * argv[], struct clarg *actarg, struct option *opt)
+{
+    if(actarg->present) {
+        warnx("Option \"%s\" already specified", opt->name);
+        usage_short();
+        return;
+    } else {
+        actarg->present = 1;
+    }
+
+    switch(opt->has_arg) {
+        case no_argument:
+            actarg->hasArg = 0;
+            break;
+        case required_argument:
+            actarg->hasArg = 1;
+            strlcpy(actarg->argument, optarg, sizeof(actarg->argument));
+            break;
+        case optional_argument:
+            if(argv[optind] && argv[optind][0] != '-') {
+                actarg->hasArg = 1;
+                strlcpy(actarg->argument, argv[optind], sizeof(actarg->argument));
+            } else {
+                actarg->hasArg = 0;
+            }
+            break;
+    }
+}
+
 
 int main (int argc, char * argv[])
 {
@@ -135,6 +173,10 @@ int main (int argc, char * argv[])
     context.version = 0;
     context.logstring = blesslog;
     context.logrefcon = &bcon;
+    
+    if (BLGetPreBootEnvironmentType(&context, &firmwareType)) {
+        errx(1, "Could not determine firmware environment");
+    }
 
     if(argc == 1) {
         usage_short();
@@ -150,69 +192,122 @@ int main (int argc, char * argv[])
 
     
     while ((ch = getopt_long_only(argc, argv, "", longopts, &longindex)) != -1) {
-        
-        switch(ch) {
-            case khelp:
-                usage();
-                break;
-            case kquiet:
-                break;
-            case kverbose:
-                bcon.verbose = 1;
-                break;
-            case kversion:
-                printf("%s\n", blessVersionNumString);
-                exit(0);
-                break;
-            case kpayload:
-                actargs[ch].present = 1;
-                break;
-            case ksave9:
-                // ignore, this is now always saved as alternateos
-                break;
-			case kbootblockfile:
-				errx(1, "The bootblockfile option is now obsolete.");
-				break;
-            case '?':
-            case ':':
-                usage_short();
-                break;
-            default:
-                // common handling for all other options
-            {
-                struct option *opt = &longopts[longindex];
-                
-                
-                if(actargs[ch].present) {
-                    warnx("Option \"%s\" already specified", opt->name);
+        if (firmwareType == kBLPreBootEnvType_iBoot) {
+            switch(ch) {
+                case khelp:
+                    usage();
+                    break;
+                case kquiet:
+                    break;
+                case kverbose:
+                    bcon.verbose = 1;
+                    break;
+                case kversion:
+                    printf("%s\n", blessVersionNumString);
+                    exit(0);
+                    break;
+                case kapfsdriver:
+                    errx(1, "The 'apfsdriver' option is not supported on Apple Silicon devices.");
+                    break;
+                case kalternateos:
+                    warnx("The 'alternateos/alternateOS' option is deprecated\n");
+                    break;
+                case kbootinfo:
+                    errx(1, "The 'bootinfo' option is not supported on Apple Silicon devices.");
+                    break;
+                case kbooter:
+                    errx(1, "The 'booter' option is not supported on Apple Silicon devices.");
+                    break;
+                case kfirmware:
+                    errx(1, "The 'firmware' option is not supported on Apple Silicon devices.");
+                    break;
+                case kfolder9:
+                    errx(1, "The 'folder9' option is not supported on Apple Silicon devices.");
+                    break;
+                case kkernel:
+                    errx(1, "The 'kernel' option is not supported on Apple Silicon devices.");
+                    break;
+                case kkernelcache:
+                    errx(1, "The 'kernelcache' option is not supported on Apple Silicon devices.");
+                    break;
+                case klegacy:
+                case klegacydrivehint:
+                    errx(1, "The 'legacy' and 'legacydriverhint' options are not supported on Apple Silicon devices.");
+                    break;
+                case kmkext:
+                    errx(1, "The 'mkext' option is not supported on Apple Silicon devices.");
+                    break;
+                case knetboot:
+                    errx(1, "The 'netboot' option is not supported on Apple Silicon devices.");
+                    break;
+                case kopenfolder:
+                    errx(1, "The 'openfolder' is not supported on Apple Silicon devices.");
+                    break;
+                case kpayload:
+                    errx(1, "The 'payload' option is not supported on Apple Silicon devices.");
+                    break;
+                case kserver:
+                    errx(1, "The 'server' option is not supported on Apple Silicon devices.");
+                    break;
+                case ksave9:
+                    warnx("The 'save9' option is deprecated\n");
+                    break;
+                case kuse9:
+                    warnx("The 'use9' option is deprecated\n");
+                    break;
+                case '?':
+                case ':':
                     usage_short();
                     break;
-                } else {
-                    actargs[ch].present = 1;
-                }
-                
-                switch(opt->has_arg) {
-                    case no_argument:
-                        actargs[ch].hasArg = 0;
-                        break;
-                    case required_argument:
-                        actargs[ch].hasArg = 1;
-                        strlcpy(actargs[ch].argument, optarg, sizeof(actargs[ch].argument));
-                        break;
-                    case optional_argument:
-                        if(argv[optind] && argv[optind][0] != '-') {
-                            actargs[ch].hasArg = 1;
-                            strlcpy(actargs[ch].argument, argv[optind], sizeof(actargs[ch].argument));
-                        } else {
-                            actargs[ch].hasArg = 0;
-                        }
-                        break;
-                }
+                default:
+                    blessHandleArgument(argv, &actargs[ch], &longopts[longindex]);
+                    break;
             }
-                break;
+        } else {
+            switch(ch) {
+                case khelp:
+                    usage();
+                    break;
+                case kquiet:
+                    break;
+                case kverbose:
+                    bcon.verbose = 1;
+                    break;
+                case kversion:
+                    printf("%s\n", blessVersionNumString);
+                    exit(0);
+                    break;
+                case kalternateos:
+                    warnx("The 'alternateos/alternateOS' option is deprecated\n");
+                    break;
+                case kbootinfo:
+                    warnx("The 'bootinfo' option is deprecated\n");
+                    break;
+                case kfolder9:
+                    warnx("The 'folder9' option is deprecated\n");
+                    break;
+                case kopenfolder:
+                    warnx("The 'openfolder' option is deprecated\n");
+                    break;
+                case kpayload:
+                    actargs[ch].present = 1;
+                    break;
+                case ksave9:
+                    warnx("The 'save9' option is deprecated\n");
+                    break;
+                case kuse9:
+                    warnx("The 'use9' option is deprecated\n");
+                    break;
+                case '?':
+                case ':':
+                    usage_short();
+                    break;
+                default:
+                    blessHandleArgument(argv, &actargs[ch], &longopts[longindex]);
+                    break;
+            }
         }
     }
-
     argc -= optind;
     argc += optind;
     
@@ -220,31 +315,139 @@ int main (int argc, char * argv[])
      * There is 1 private mode: firmware
      * These are all one-way function jumps.
      */
+    if (firmwareType == kBLPreBootEnvType_iBoot) {
+        /* External TDM devices are treated as standalone devices.
+         * In order to use a TDM device as an external media to boot the current Apple silicon device use
+         * the '--use-tdm-as-external' option.
+         * For external/removable devices which are not TDM devices the following rules apply:
+         * '--folder', '--file' and '--info' are used to boot/bless and get information based on x86 architecture
+         * with the intent that this external/removable device will be used for booting an x86 Mac.
+         * All other options are used to boot/bless and get information based on arm64e architecture
+         * with the intent that this external/removable device will be used for booting this Apple Silicon Mac.
+         */
+        bool tdm = false;
+        bool external = false;
+        bool removable = false;
+        char bsdName[BSD_NAME_SIZE];
+        int ret = 0;
 
-    /* If it was requested, print out the Finder Info words */
-    if(actargs[kinfo].present || actargs[kgetboot].present) {
-        return modeInfo(&context, actargs);
+        if (!actargs[kgetboot].present) {
+            if (actargs[kinfo].present) {
+                ret = BLGetCommonMountPoint(&context, actargs[kinfo].argument, "", actargs[kmount].argument);
+            } else if (actargs[kunbless].present) {
+                ret = BLGetCommonMountPoint(&context, actargs[kunbless].argument, "", actargs[kmount].argument);
+            } else if (actargs[kfolder].present) {
+                ret = extractMountPoint(&context, actargs);
+            }
+            if (ret) {
+                return ret;
+            }
+            if (actargs[kdevice].present) {
+                strlcpy(bsdName, actargs[kdevice].argument + strlen(_PATH_DEV), sizeof(bsdName));
+            } else if ((ret = extractDiskFromMountPoint(&context, actargs[kmount].argument, bsdName, BSD_NAME_SIZE)) != 0) {
+                blesscontextprintf(&context, kBLLogLevelError, "Could not extract BSD name from mount point %s\n", actargs[kmount].argument);
+                return ret;
+            }
+
+            ret = isMediaTDM(&context, bsdName, &tdm);
+            if (ret) {
+                return ret;
+            }
+            ret = isMediaExternal(&context, bsdName, &external);
+            if (ret) {
+                return ret;
+            }
+            ret = isMediaRemovable(&context, bsdName, &removable);
+            if (ret) {
+                return ret;
+            }
+        }
+
+        /* '--setboot' and '--nextonly' relevant only for booting current internal Apple Silicon device
+         * '--folder' is used to boot device based on Intel Atchitecture. Therefore those options
+         * are not relevant.
+         */
+        if (actargs[kfolder].present) {
+            if (actargs[ksetboot].present) {
+                errx(1, "For Apple Silicon Macs, 'setboot' option is not supported in Folder mode");
+            }
+            if (actargs[knextonly].present) {
+                errx(1, "For Apple Silicon Macs, 'nextonly' option is not supported in Folder mode");
+            }
+        }
+
+        /* Handle Info mode (--info, --getBoot):
+         * TDM is also considered an external devices
+         */
+        if (actargs[kgetboot].present ||
+            (actargs[kinfo].present && external) ||
+            (actargs[kinfo].present && removable)) {
+            /* If it was requested, print out the Finder Info words */
+            return modeInfo(&context, actargs);
+        } else if (actargs[kinfo].present) {
+            errx(1, "For Apple Silicon Macs, the 'info' option is only supported for external devices.");
+        }
+
+        /* Handle TDM devices (Device mode, Unbless mode, File/Folder mode, Mount mode,
+         * Info mode is handled above):
+         */
+        if (tdm && !actargs[kusetdmasexternal].present) {
+            if (actargs[kdevice].present) {
+                return modeDevice(&context, actargs);
+            }
+            if (actargs[kunbless].present) {
+                return modeUnbless(&context, actargs);
+            }
+            return modeFolder(&context, actargs);
+        }
+
+        /* Handle external and removable devices not in TDM (Folder mode): */
+        if (!tdm && (external || removable)) {
+            if (actargs[kfolder].present) {
+                return modeFolder(&context, actargs);
+            }
+        }
+
+        if (actargs[kunbless].present) {
+            errx(1, "For Apple Silicon Macs, the 'unbless' option is only supported for Intel architecture based devices in TDM");
+        }
+        if (actargs[kfolder].present) {
+            errx(1, "For Apple Silicon Macs, the 'folder' option is only supported for external devices");
+        }
+        if (actargs[kfile].present) {
+            errx(1, "For Apple Silicon Macs, the 'file' option is supported for external devices in Folder mode only");
+        }
+
+        /* Handle AS devices (Device mode, Mount mode,
+         * Info mode is handled above):
+         */
+        return blessViaBootability(&context, actargs);
+
+    } else {
+        /* If it was requested, print out the Finder Info words */
+        if(actargs[kinfo].present || actargs[kgetboot].present) {
+            return modeInfo(&context, actargs);
+        }
+
+        if(actargs[kdevice].present) {
+            return modeDevice(&context, actargs);
+        }
+
+        if(actargs[kfirmware].present) {
+            return modeFirmware(&context, actargs);
+        }
+
+        if(actargs[knetboot].present) {
+            return modeNetboot(&context, actargs);
+        }
+
+        if (actargs[kunbless].present) {
+            return modeUnbless(&context, actargs);
+        }
+
+        /* default */
+        return modeFolder(&context, actargs);
     }
-
-    if(actargs[kdevice].present) {
-        return modeDevice(&context, actargs);
-    }
-
-	if(actargs[kfirmware].present) {
-		return modeFirmware(&context, actargs);
-	}
-	
-	if(actargs[knetboot].present) {
-		return modeNetboot(&context, actargs);
-	}
-	
-	if (actargs[kunbless].present) {
-		return modeUnbless(&context, actargs);
-	}
-	
-    /* default */
-    return modeFolder(&context, actargs);
-
 }
 
 

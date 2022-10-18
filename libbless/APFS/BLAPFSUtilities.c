@@ -36,6 +36,8 @@
 #include <IOKit/storage/IOMedia.h>
 #include <APFS/APFS.h>
 #include <apfs/apfs_fsctl.h>
+#include <sysexits.h>
+#include <unistd.h>
 #include "bless.h"
 #include "bless_private.h"
 #include "protos.h"
@@ -43,6 +45,8 @@
 #ifndef    FSOPT_LIST_SNAPSHOT
 #define    FSOPT_LIST_SNAPSHOT 0x00000040
 #endif/* FSOPT_LIST_SNAPSHOT */
+
+#define MOUNT_RETRIES 15
 
 static uint16_t RoleNameToValue(CFStringRef roleName);
 
@@ -249,6 +253,8 @@ int BLMountContainerVolume(BLContextPtr context, const char *bsdName, char *mntP
     char	*newargv[13];
     char    *installEnv;
 	int		i;
+    int     retries = 0;
+    pid_t   p;
     
     installEnv = getenv("__OSINSTALL_ENVIRONMENT");
     if (installEnv && (atoi(installEnv) > 0 || strcasecmp(installEnv, "yes") == 0 || strcasecmp(installEnv, "true") == 0)) {
@@ -289,20 +295,25 @@ int BLMountContainerVolume(BLContextPtr context, const char *bsdName, char *mntP
     
     
     contextprintf(context, kBLLogLevelVerbose, "Executing \"%s\"\n", "/sbin/mount");
-    
-    pid_t p = fork();
-    if (p == 0) {
-        setuid(geteuid());
-        ret = execv("/sbin/mount", newargv);
-        if (ret == -1) {
-            contextprintf(context, kBLLogLevelError,  "Could not exec %s\n", "/sbin/mount");
-        }
-        _exit(1);
-    }
-    
+
     do {
-        p = wait(&ret);
-    } while (p == -1 && errno == EINTR);
+        p = fork();
+        if (p == 0) {
+            setuid(geteuid());
+            ret = execv("/sbin/mount", newargv);
+            if (ret == -1) {
+                contextprintf(context, kBLLogLevelError,  "Could not exec %s\n", "/sbin/mount");
+            }
+            _exit(1);
+        }
+    
+        do {
+            p = wait(&ret);
+        } while (p == -1 && errno == EINTR);
+
+        retries++;
+        sleep(1);
+    } while (WIFEXITED(ret) && (WEXITSTATUS(ret) == EX_TEMPFAIL) && (retries < MOUNT_RETRIES));
     
     contextprintf(context, kBLLogLevelVerbose, "Returned %d\n", ret);
     if (p == -1 || ret) {
@@ -451,7 +462,7 @@ int BLEnsureSpecialAPFSVolumeUUIDPath(BLContextPtr context, const char *volumeDe
     io_service_t    service = IO_OBJECT_NULL;
     CFStringRef     uuidKey = NULL;
     CFStringRef     uuidVal = NULL;
-    int             len;
+    size_t          len;
 
     strlcpy(specialDevPath, _PATH_DEV, sizeof specialDevPath);
 

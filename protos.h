@@ -34,12 +34,22 @@
 #include <stdbool.h>
 #include <sys/cdefs.h>
 
+#define BSD_NAME_SIZE 128
+
+BLPreBootEnvType getPrebootType(void);
 int modeInfo(BLContextPtr context, struct clarg actargs[klast]);
 int modeDevice(BLContextPtr context, struct clarg actargs[klast]);
 int modeFolder(BLContextPtr context, struct clarg actargs[klast]);
 int modeFirmware(BLContextPtr context, struct clarg actargs[klast]);
 int modeNetboot(BLContextPtr context, struct clarg actargs[klast]);
 int modeUnbless(BLContextPtr context, struct clarg actargs[klast]);
+int extractMountPoint(BLContextPtr context, struct clarg actargs[klast]);
+int extractDiskFromMountPoint(BLContextPtr context, const char *mnt, char *disk, size_t disk_size);
+int isMediaExternal(BLContextPtr context, const char *mnt, bool *external);
+int isMediaRemovable(BLContextPtr context, const char *mnt, bool *removable);
+int isMediaTDM(BLContextPtr context, const char *mnt, bool *tdm);
+
+int blessViaBootability(BLContextPtr context, struct clarg actargs[klast]);
 
 int blesslog(void *context, int loglevel, const char *string);
 int blesscontextprintf(BLContextPtr context, int loglevel, char const *fmt, ...) __printflike(3, 4);
